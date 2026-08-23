@@ -252,6 +252,7 @@ func (s *service) bindClientIO(p *SessionParams, sessionID string) {
 type acpController interface {
 	control.Lifecycle
 	control.TurnControl
+	RunFinalReadinessRecoveryWithAdmission(ctx context.Context, input string, onAdmitted func()) error
 	TrySteer(text string) bool
 	control.Approvals
 	control.Capabilities
@@ -1155,32 +1156,44 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	if !ok {
 		return nil, &RPCError{Code: ErrInvalidRequest, Message: "session/prompt: session already has an active prompt"}
 	}
-	if sess.status == nil {
-		sess.status = newStatusTelemetry()
-	}
-	sess.status.beginTurn()
-	s.publishStatus(sess, "phase")
-	sess.sink.setTurnContext(runCtx)
-	if sess.takeGoalDraftMode() {
-		sess.currentCtrl().SetGoal(text)
-		sess.saveMetaIfPresent()
-	}
 	defer func() {
 		sess.sink.clearTurnContext()
 		s.finishTurn(ctx, sess)
 		cancel()
 	}()
+	statusStarted := false
+	beginTurn := func() {
+		if sess.status == nil {
+			sess.status = newStatusTelemetry()
+		}
+		sess.status.beginTurn()
+		s.publishStatus(sess, "phase")
+		sess.sink.setTurnContext(runCtx)
+		if sess.takeGoalDraftMode() {
+			sess.currentCtrl().SetGoal(text)
+			sess.saveMetaIfPresent()
+		}
+		statusStarted = true
+	}
 	var runErr error
 	if recovery {
-		runErr = sess.ctrl.RunFinalReadinessRecovery(runCtx, text)
+		runErr = sess.ctrl.RunFinalReadinessRecoveryWithAdmission(runCtx, text, beginTurn)
 	} else {
+		beginTurn()
 		runErr = sess.ctrl.RunTurn(runCtx, text)
 	}
+	if errors.Is(runErr, control.ErrNoFinalReadinessRecovery) && !statusStarted {
+		return nil, &RPCError{
+			Code:    ErrInvalidRequest,
+			Message: "session/prompt: no pending final-readiness check to continue",
+		}
+	}
 	runErr = drainACPInbox(runCtx, sess.ctrl, runErr)
+	cancelled := runCtx.Err() != nil
 
 	statusEvent := sess.status.finishTurn(
 		runErr,
-		runCtx.Err() != nil,
+		cancelled,
 		sess.currentCtrl().GoalStatus(),
 		finalAssistantSummary(sess.currentCtrl()),
 	)
@@ -1189,19 +1202,39 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	// the transcript and the same sequence/usage/outcome snapshot.
 	sess.persistAfterTurn(text)
 
-	stop := StopEndTurn
-	if runErr != nil {
-		if runCtx.Err() != nil {
-			stop = StopCancelled
-		} else {
-			stop = StopError
-		}
+	stop, warning, promptErr := promptStopReason(runErr, cancelled, p.SessionID)
+	if promptErr != nil {
+		return nil, promptErr
+	}
+	if warning != "" {
+		// The TUI keeps completed work for deliberate run boundaries; mirror
+		// that for ACP and tell clients how the successful turn ended.
+		sess.sink.Emit(event.Event{
+			Kind:  event.Notice,
+			Level: event.LevelWarn,
+			Text:  warning,
+		})
 	}
 	res := SessionPromptResult{StopReason: stop}
 	if sess.transcript != "" {
 		res.TranscriptPath = &sess.transcript
 	}
 	return res, nil
+}
+
+// finalReadinessNotice is the warning text ACP clients receive when a completed
+// turn's final-readiness gate stays unsatisfied; the TUI shows the same gaps in
+// its recovery card.
+func finalReadinessNotice(e *agent.FinalReadinessError) string {
+	const maxNoticeBytes = 2_048
+	const fallback = "final-answer readiness gate not satisfied"
+	if e == nil {
+		return fallback
+	}
+	if reason := strings.TrimSpace(e.Reason); reason != "" {
+		return clipStatusCredentialText(fallback+": "+reason, maxNoticeBytes)
+	}
+	return clipStatusError(e, maxNoticeBytes)
 }
 
 // sessionSteer durably persists guidance then attempts mid-turn admission.
@@ -1466,20 +1499,26 @@ func (s *service) sessionSetConfigOption(ctx context.Context, raw json.RawMessag
 	if sess == nil {
 		return nil, &RPCError{Code: ErrInvalidParams, Message: "session/set_config_option: unknown session " + p.SessionID}
 	}
-	// Deprecated execution-mode options are no longer published, but
-	// one-version-old clients still send them. Accept, switch nothing, rebuild
-	// nothing, and answer success with a deprecation notice.
-	if id := normalizeConfigID(p.ConfigID); id == "work_mode" || id == "agent_preset" {
+	// The execution-mode options are now the session quality floor: light
+	// folds to standard silently, delivery sets the delivery floor.
+	if id := normalizeConfigID(p.ConfigID); id == "work_mode" || id == "agent_preset" || id == "quality_floor" {
 		if err := validateDeprecatedModeValue(p.Value); err != nil {
 			return nil, &RPCError{Code: ErrInvalidParams, Message: "session/set_config_option: " + err.Error()}
+		}
+		ctrl := sess.currentCtrl()
+		if ctrl != nil {
+			if p, err := agentpreset.Normalize(p.Value); err == nil {
+				if err := ctrl.SetQualityFloor(string(p)); err != nil {
+					return nil, &RPCError{Code: ErrInternal, Message: "session/set_config_option: " + err.Error()}
+				}
+			}
 		}
 		cfgState, err := s.configStateForSession(ctx, sess)
 		if err != nil {
 			return nil, &RPCError{Code: ErrInternal, Message: "session/set_config_option: " + err.Error()}
 		}
 		return SetSessionConfigOptionResult{
-			ConfigOptions:    cfgState.ConfigOptions,
-			DeprecatedNotice: agentpreset.DeprecatedNotice,
+			ConfigOptions: cfgState.ConfigOptions,
 		}, nil
 	}
 	cfgState, err := s.configStateForSession(ctx, sess)
@@ -2231,7 +2270,8 @@ func (s *service) configStateForSession(ctx context.Context, sess *acpSession) (
 	// Fold in the live controller's extension catalog so plugin/... models
 	// are discoverable on every config-state read, not only when current.
 	state = enrichStateWithExtensionModels(state, sess.currentCtrl().ProviderCatalog())
-	return withToolApprovalConfig(state, sess.currentToolApprovalMode()), nil
+	state = withToolApprovalConfig(state, sess.currentToolApprovalMode())
+	return withQualityFloorConfig(state, sess.currentQualityFloor()), nil
 }
 
 func (s *acpSession) configStateParams() SessionConfigStateParams {
@@ -2312,11 +2352,11 @@ func findConfigOption(options []SessionConfigOption, id string) (SessionConfigOp
 // well-formed values succeed as no-ops.
 func validateDeprecatedModeValue(value string) error {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "light", "economy", "eco", "lite",
-		"balanced", "full", "delivery", "deliver", "quality":
+	case "", "light", "economy", "eco", "lite", "save", "saving", "low", "minimal",
+		"standard", "normal", "balanced", "full", "delivery", "deliver", "quality":
 		return nil
 	}
-	return fmt.Errorf("invalid value %q for deprecated execution setting (accepted: light, balanced, delivery; legacy: economy, full)", value)
+	return fmt.Errorf("invalid value %q for quality floor (accepted: standard, delivery; legacy light folds to standard)", value)
 }
 
 func normalizeConfigID(id string) string {

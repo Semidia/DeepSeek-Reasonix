@@ -10,6 +10,8 @@ import (
 	"reasonix/internal/event"
 	"reasonix/internal/evidence"
 	"reasonix/internal/provider"
+	"reasonix/internal/runtimepolicy"
+	"reasonix/internal/taskcontract"
 	"reasonix/internal/tool"
 )
 
@@ -41,8 +43,11 @@ func TestDeliveryExecutionScopeDoesNotChangeProviderRequestBytes(t *testing.T) {
 	}
 }
 
+// Delivery-scoped goal turns run under the delivery floor: the floor is what
+// arms the readiness pause these tests assert on.
 func deliveryGoalContext(id, task string) context.Context {
-	return WithDeliveryExecutionScope(context.Background(), DeliveryExecutionScope{ID: id, TaskText: task})
+	ctx := runtimepolicy.WithContext(context.Background(), runtimepolicy.Constraints{PolicyFloor: taskcontract.PolicyFloorDelivery})
+	return WithDeliveryExecutionScope(ctx, DeliveryExecutionScope{ID: id, TaskText: task})
 }
 
 func TestDeliveryGoalFinalAnswerAlwaysGatesMutationExpectation(t *testing.T) {
@@ -56,13 +61,10 @@ func TestDeliveryGoalFinalAnswerAlwaysGatesMutationExpectation(t *testing.T) {
 	}}
 	a := New(prov, reg, NewSession(""), Options{}, event.Discard)
 	ctx := withClosedLoopContext(deliveryGoalContext("goal-1", "fix the crash in main.go"))
-	// A read-only final answer is gated on the mutation expectation immediately:
-	// the host no longer defers readiness for marker-carrying turns, the Goal
-	// FSM absorbs the failure and continues with the missing requirements.
-	err := a.Run(ctx, "investigate the crash")
-	var readiness *FinalReadinessError
-	if !errors.As(err, &readiness) || !strings.Contains(readiness.Reason, "state change") {
-		t.Fatalf("read-only final answer err = %v, want mutation readiness failure", err)
+	// Prompt text does not invent a mutation. A Goal investigation that only
+	// reads may finish without a state-change obligation.
+	if err := a.Run(ctx, "investigate the crash"); err != nil {
+		t.Fatalf("read-only Goal investigation = %v, want ready", err)
 	}
 }
 

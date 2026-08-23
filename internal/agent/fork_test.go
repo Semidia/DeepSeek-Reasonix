@@ -17,8 +17,10 @@ import (
 func forkScriptTurns() [][]provider.Chunk {
 	return [][]provider.Chunk{
 		{toolCallChunk("c1", "write_file", `{"path":"a.py","content":"x"}`)},
-		{toolCallChunk("c2", "write_file", `{"path":"b.py","content":"x"}`)},
-		{toolCallChunk("c3", "write_file", `{"path":"c.py","content":"x"}`)},
+		// Keep this fixture single-target: it measures the evidence-blindness
+		// fork, not the cumulative multi-file precondition guard.
+		{toolCallChunk("c2", "write_file", `{"path":"a.py","content":"y"}`)},
+		{toolCallChunk("c3", "write_file", `{"path":"a.py","content":"z"}`)},
 		{{Type: provider.ChunkText, Text: "done"}},
 	}
 }
@@ -53,6 +55,9 @@ func TestForkControlContinuationMatchesOriginalRequest(t *testing.T) {
 	if b.BlindAtFork != 3 || b.DebtAtFork == 0 || b.EligibleRound != 3 {
 		t.Fatalf("bundle = blind %d debt %d round %d, want 3/>0/3", b.BlindAtFork, b.DebtAtFork, b.EligibleRound)
 	}
+	if !b.RunwayObserved || b.RunwayBalance <= 0 {
+		t.Fatalf("bundle runway = observed %v balance %d, want an observed solvent account", b.RunwayObserved, b.RunwayBalance)
+	}
 	if b.Input != "fix the widget" {
 		t.Fatalf("bundle input = %q", b.Input)
 	}
@@ -73,6 +78,20 @@ func TestForkControlContinuationMatchesOriginalRequest(t *testing.T) {
 	want, got := orig.requests[3], cont.requests[0]
 	if !reflect.DeepEqual(want.Messages, got.Messages) {
 		t.Fatalf("control fork payload diverged from original continuation:\nwant %d messages\ngot  %d messages", len(want.Messages), len(got.Messages))
+	}
+}
+
+func TestLoadLegacyForkBundleLeavesRunwayUnobserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-bundle.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"policy":"ebm","input":"x","messages":[]}`), 0o600); err != nil {
+		t.Fatalf("write legacy bundle: %v", err)
+	}
+	b, err := LoadForkBundle(path)
+	if err != nil {
+		t.Fatalf("LoadForkBundle: %v", err)
+	}
+	if b.RunwayObserved || b.RunwayBalance != 0 || b.RunwayDry != 0 || b.RunwayIdle != 0 {
+		t.Fatalf("legacy runway fields = %+v, want unobserved zero values", b)
 	}
 }
 

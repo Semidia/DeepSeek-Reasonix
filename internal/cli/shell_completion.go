@@ -277,12 +277,8 @@ func cliCompletionRootSpec() cliCompletionSpec {
 			),
 			completionSpec("weixin-login", []cliCompletionFlag{completionFlag("--timeout", cliCompletionStaticValue), help}),
 		),
-		completionSpecWithAliases("upgrade", []string{"update"}, []cliCompletionFlag{
-			completionFlag("--check --force", cliCompletionNoValue), completionFlag("--channel", cliCompletionStaticValue), help,
-		}),
-		completionSpec("source-update", []cliCompletionFlag{
-			completionFlag("--check --fetch --json", cliCompletionNoValue), completionFlag("--root", cliCompletionPathValue), help,
-		}),
+		upgradeCompletionSpec(help),
+		sourceUpdateCompletionSpec(help),
 		completionSpec("completion", []cliCompletionFlag{help},
 			completionSpec("bash", nil),
 			completionSpec("zsh", nil),

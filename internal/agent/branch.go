@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 	fileencoding "reasonix/internal/fileutil/encoding"
 	"reasonix/internal/store"
 )
+
+// ErrSessionTitleChanged reports that a conditional rename observed a newer
+// custom title and left it untouched.
+var ErrSessionTitleChanged = errors.New("session title changed")
 
 // BranchMeta is the small sidecar record that turns flat session files into a
 // navigable conversation tree. The conversation itself remains in the .jsonl
@@ -32,10 +37,13 @@ type BranchMeta struct {
 	TopicTitle       string    `json:"topic_title,omitempty"`
 	CustomTitle      string    `json:"custom_title,omitempty"`
 	Model            string    `json:"model,omitempty"`
-	// TokenMode is a deprecated dual-write field; new writes pin it to "full".
-	TokenMode string `json:"token_mode,omitempty"`
-	// AgentPreset is a deprecated dual-write field; new writes pin it to "balanced".
-	AgentPreset      string `json:"agent_preset,omitempty"`
+	// TokenMode and AgentPreset are deprecated dual-write fields derived from
+	// QualityFloor; delivery writes "delivery", standard writes "full"/"".
+	TokenMode   string `json:"token_mode,omitempty"`
+	AgentPreset string `json:"agent_preset,omitempty"`
+	// QualityFloor is the session delivery floor (standard|delivery). Loading
+	// a meta without it maps legacy AgentPreset/TokenMode "delivery" here.
+	QualityFloor     string `json:"quality_floor,omitempty"`
 	Mode             string `json:"mode,omitempty"`
 	ToolApprovalMode string `json:"tool_approval_mode,omitempty"`
 	Goal             string `json:"goal,omitempty"`
@@ -557,6 +565,18 @@ func ListBranches(dir string) ([]BranchInfo, error) {
 // topic title remains a separate grouping label, so explicit session names do
 // not fight topic auto-titling.
 func RenameSession(sessionPath string, title string) error {
+	return renameSession(sessionPath, nil, title)
+}
+
+// RenameSessionIfTitleUnchanged atomically updates a session title only when
+// no newer title writer has changed it since expectedTitle was observed. The
+// comparison and write share the BranchMeta path lock, so a delayed AI result
+// cannot overwrite a newer manual or AI rename.
+func RenameSessionIfTitleUnchanged(sessionPath, expectedTitle, title string) error {
+	return renameSession(sessionPath, &expectedTitle, title)
+}
+
+func renameSession(sessionPath string, expectedTitle *string, title string) error {
 	if sessionPath == "" {
 		return fmt.Errorf("empty session path")
 	}
@@ -571,6 +591,9 @@ func RenameSession(sessionPath string, title string) error {
 	m, err := ensureBranchMetaUnlocked(sessionPath)
 	if err != nil {
 		return err
+	}
+	if expectedTitle != nil && m.CustomTitle != *expectedTitle {
+		return fmt.Errorf("%w: expected %q, found %q", ErrSessionTitleChanged, *expectedTitle, m.CustomTitle)
 	}
 	m.CustomTitle = strings.TrimSpace(title)
 	return saveBranchMeta(sessionPath, m, false)

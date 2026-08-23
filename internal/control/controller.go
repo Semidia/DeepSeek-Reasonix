@@ -119,11 +119,14 @@ type Controller struct {
 	// one — sub-agents then keep whatever gate they were constructed with.
 	subagentGate *SharedHeadlessGate
 
-	label        string
-	modelRef     string
-	systemPrompt string
-	sessionDir   string
-	commands     atomic.Pointer[[]command.Command]
+	label                  string
+	modelRef               string
+	visionModel            string
+	visionProviderResolver func(string) (provider.Provider, error)
+	visionModelSelector    func(string, string) (string, bool)
+	systemPrompt           string
+	sessionDir             string
+	commands               atomic.Pointer[[]command.Command]
 	// skills owns the session's discovered skills (enabled subset, full set, and
 	// the reloadable stores) — the skills slice of the Capabilities concern. See
 	// skill.go.
@@ -154,6 +157,7 @@ type Controller struct {
 	closeOnce                         sync.Once                        // makes close idempotent under racing teardown paths
 	onRemember                        func(rule string) RememberResult // set via Options; invoked when user picks "always allow"
 	onRememberPlanModeReadOnlyCommand func(prefix string) PlanModeReadOnlyCommandTrustResult
+	writeAccess                       controllerWriteAccess
 	sessionRecoveryMeta               func(SessionRecoveryRequest) agent.BranchMeta
 	onSessionRecovered                func(SessionRecoveryInfo) error
 	onSessionTransition               func(SessionTransitionInfo) error
@@ -288,10 +292,12 @@ type Controller struct {
 	// and rotating are mutually exclusive gates — a turn refuses to start while
 	// a rotation is in progress, and a rotation refuses to start while a turn
 	// runs — so the run loop's session reference cannot change under it.
-	rotating    bool
-	autosaveWG  sync.WaitGroup
-	planMode    bool
-	sessionPath string
+	rotating   bool
+	autosaveWG sync.WaitGroup
+	// sessionSettings groups the per-session posture knobs that share one
+	// lifetime: swapped together on session rotation.
+	sessionSettings sessionSettings
+	sessionPath     string
 	// sessionTemp owns the logical-session private temporary directory shared
 	// by Bash calls. Retained for this Controller's lifetime; rotated on
 	// /new, /clear, resume of another session, and branch switches.
@@ -318,9 +324,11 @@ type Controller struct {
 }
 
 type approvalReply struct {
-	allow   bool
-	session bool
-	persist bool // true = write "always allow" rule to config
+	allow      bool
+	session    bool
+	persist    bool // true = write "always allow" rule to config
+	onceDirs   []string
+	persistErr error
 }
 
 type pendingApproval struct {
@@ -332,8 +340,9 @@ type pendingApproval struct {
 	fresh        bool
 	requireHuman bool
 	autoDrain    bool
-	kind         string // tool | plan | recovery; empty = tool
+	kind         string // tool | plan | recovery | write_access; empty = tool
 	recovery     *event.RecoveryApproval
+	writeAccess  *event.WriteAccessApproval
 	reply        chan approvalReply
 }
 
@@ -440,18 +449,24 @@ type Options struct {
 	// SetToolApprovalMode and ApplyHeadlessApprovalMode call Update on it so a
 	// runtime approval-mode switch reaches sub-agents, not just the parent
 	// executor's own gate.
-	SubagentGate  *SharedHeadlessGate
-	Label         string
-	ModelRef      string
-	SystemPrompt  string
-	SessionDir    string
-	SessionPath   string
-	Host          *plugin.Host
-	Commands      []command.Command
-	Skills        []skill.Skill
-	AllSkills     []skill.Skill
-	SkillStore    *skill.Store
-	AllSkillStore *skill.Store
+	SubagentGate *SharedHeadlessGate
+	Label        string
+	ModelRef     string
+	// VisionModel is empty (off), "auto", or a canonical provider/model ref.
+	// The resolver and selector are assembled by boot so the controller remains
+	// transport-agnostic and tests can inject deterministic fake providers.
+	VisionModel            string
+	VisionProviderResolver func(string) (provider.Provider, error)
+	VisionModelSelector    func(string, string) (string, bool)
+	SystemPrompt           string
+	SessionDir             string
+	SessionPath            string
+	Host                   *plugin.Host
+	Commands               []command.Command
+	Skills                 []skill.Skill
+	AllSkills              []skill.Skill
+	SkillStore             *skill.Store
+	AllSkillStore          *skill.Store
 	// DisableImplicitSkillInvocation controls model-facing discovery only;
 	// explicit /skill commands and management remain host-side capabilities.
 	DisableImplicitSkillInvocation bool
@@ -523,6 +538,16 @@ type Options struct {
 	// read-only when the user chooses "always allow" from the plan-mode trust
 	// prompt.
 	OnRememberPlanModeReadOnlyCommand func(prefix string) PlanModeReadOnlyCommandTrustResult
+	// OnPersistWriteAccess writes sandbox.allow_write and an optional permission
+	// rule to the workspace reasonix.toml as one transaction.
+	OnPersistWriteAccess PersistWriteAccessFunc
+	// WriteRoots is the session-scoped writable directory manager shared with
+	// built-in file tools and bash.
+	WriteRoots *sandbox.WritableRootSet
+	// BashSandboxEnforced is true when this session's bash tool actually wraps
+	// commands in an OS sandbox. Windows and bash=off leave this false so
+	// directory prompts are not implied for unisolated shell writes.
+	BashSandboxEnforced bool
 	// SessionRecoveryMeta lets a frontend attach scope/topic/profile metadata to
 	// an automatic recovery branch before it is written.
 	SessionRecoveryMeta func(SessionRecoveryRequest) agent.BranchMeta
@@ -562,6 +587,13 @@ type Options struct {
 // New builds a Controller. A nil Sink becomes event.Discard; unless the caller
 // already provided a goalUsageTee (NewGoalUsageTee), the sink is wrapped in one
 // so billable usage can be accounted to Goal budgets.
+func controllerSessionTemp(existing *sessiontemp.Manager) *sessiontemp.Manager {
+	if existing != nil {
+		return existing
+	}
+	return sessiontemp.New()
+}
+
 func New(opts Options) *Controller {
 	sink := opts.Sink
 	if nilutil.IsNil(sink) {
@@ -596,6 +628,9 @@ func New(opts Options) *Controller {
 		subagentGate:                      opts.SubagentGate,
 		label:                             opts.Label,
 		modelRef:                          opts.ModelRef,
+		visionModel:                       strings.TrimSpace(opts.VisionModel),
+		visionProviderResolver:            opts.VisionProviderResolver,
+		visionModelSelector:               opts.VisionModelSelector,
 		systemPrompt:                      opts.SystemPrompt,
 		sessionDir:                        opts.SessionDir,
 		sessionPath:                       opts.SessionPath,
@@ -614,6 +649,7 @@ func New(opts Options) *Controller {
 		shell:                             opts.Shell,
 		onRemember:                        opts.OnRemember,
 		onRememberPlanModeReadOnlyCommand: opts.OnRememberPlanModeReadOnlyCommand,
+		writeAccess:                       newControllerWriteAccess(opts),
 		sessionRecoveryMeta:               opts.SessionRecoveryMeta,
 		onSessionRecovered:                opts.OnSessionRecovered,
 		onSessionTransition:               opts.OnSessionTransition,
@@ -637,11 +673,7 @@ func New(opts Options) *Controller {
 	// Session-private temporary directory: reuse a shared Manager on hot
 	// rebuild, otherwise create one. Retain so ReleaseResources/Close drop the
 	// owner reference without racing a replacement Controller.
-	if opts.SessionTemp != nil {
-		c.sessionTemp = opts.SessionTemp
-	} else {
-		c.sessionTemp = sessiontemp.New()
-	}
+	c.sessionTemp = controllerSessionTemp(opts.SessionTemp)
 	c.sessionTemp.Retain()
 	if strings.TrimSpace(opts.WorkspaceRoot) != "" {
 		c.legacyResearchArchive = legacyResearchArchive{store: autoresearch.NewStore(opts.WorkspaceRoot)}
@@ -1072,7 +1104,7 @@ const ManagedConfigWriteApprovalTool = "config_write"
 
 // planApprovedMessage is the follow-up turn sent once the user approves a plan —
 // the in-context nudge to execute and keep the (already-seeded) task list honest.
-const planApprovedMessage = "Plan approved — plan mode is off. Implement the plan now. The ordinary writer fallback is approved for this execution turn; explicit ask/deny rules and forced fresh reviews still apply. Use this serial workflow: 1) mark the first sub-step in_progress with todo_write (this establishes the task list); 2) execute the sub-step; 3) call complete_step with evidence — the host then marks that sub-step completed and moves the next one to in_progress for you. Repeat 2–3 for each remaining sub-step. You don’t need another todo_write to mark steps completed; each complete_step advances the list. Sign off one sub-step at a time — never batch multiple completions."
+const planApprovedMessage = "Plan approved — plan mode is off. Implement the plan now. The ordinary writer fallback is approved for this execution turn; explicit ask/deny rules and forced fresh reviews still apply. Use this workflow: 1) mark the first sub-step in_progress with todo_write (this establishes the task list); 2) execute the sub-step; 3) call complete_step with evidence — the host then marks that sub-step completed and moves the next one to in_progress for you. You may call complete_step for multiple sub-steps in one tool-call round when their work and evidence already exist, but keep calls in Todo order; the host processes them sequentially and rejects skipped or out-of-order sign-offs. You don’t need another todo_write to mark steps completed; each complete_step advances the list."
 
 // runTurn runs one model turn, then applies the plan-approval gate. This is the
 // single, frontend-agnostic plan flow: in Plan the model is instructed to
@@ -1980,7 +2012,12 @@ func (c *Controller) runReady(ctx context.Context, input string) (err error) {
 	}
 	marker = c.markInFlightTurn(startMessages, true)
 	ctx = c.withPlannerTurnMetadata(ctx, rawInput, false, startMessages)
-	err = c.runner.Run(ctx, c.withCapabilityRoute(ctx, input, rawInput))
+	modelInput := c.withCapabilityRoute(ctx, input, rawInput)
+	modelInput, ctx, err = c.prepareVisionTurn(ctx, modelInput, agent.SubagentImageCandidates(ctx))
+	if err != nil {
+		return err
+	}
+	err = c.runner.Run(ctx, modelInput)
 	return err
 }
 
@@ -2105,53 +2142,6 @@ func (c *Controller) Turn() int {
 	return c.turn
 }
 
-// Approve answers a pending ApprovalRequest by ID: allow runs the call, session
-// also remembers a grant for the rest of the session so the same approval scope
-// is not re-prompted. Unknown/expired IDs are ignored.
-func (c *Controller) Approve(id string, allow, session, persist bool) {
-	// Recovery cards are strict fresh decisions. Prefer ResolveRecovery so a
-	// continue/deny from an old client that only knows Approve still maps onto
-	// the recovery state machine (allow=continue, deny=revise without feedback).
-	// Session/persist grants are intentionally ignored for recovery.
-	//
-	// Lookup must use the live waiter table (HasApproval), not Snapshot: pre-
-	// normal-execution plan prompts park a waiter without an armed taskRuntime, so
-	// they never appear in the persistence snapshot.
-	c.mu.Lock()
-	gate := c.recoveryGate
-	c.mu.Unlock()
-	if gate != nil && gate.HasApproval(id) {
-		action := agent.RecoveryActionRevise
-		if allow {
-			action = agent.RecoveryActionContinue
-		}
-		_ = c.ResolveRecovery(id, action, "")
-		return
-	}
-	pending := c.approval.resolve(id)
-	if pending.reply == nil {
-		return
-	}
-	outcome := "deny"
-	if pending.tool == planApprovalTool {
-		outcome = string(PlanDecisionRevisePlan)
-		if allow {
-			outcome = string(PlanDecisionStartExecution)
-		}
-	} else if allow {
-		switch {
-		case persist:
-			outcome = "allow_persistent"
-		case session:
-			outcome = "allow_session"
-		default:
-			outcome = "allow_once"
-		}
-	}
-	c.recordDecisionReceipt(pending, outcome)
-	pending.reply <- approvalReply{allow: allow, session: session, persist: persist} // buffered, never blocks
-}
-
 // ResolvePlanDecision answers the Plan card without collapsing revise and exit
 // into the generic approval boolean used by older clients.
 func (c *Controller) ResolvePlanDecision(id string, action PlanDecisionAction) error {
@@ -2216,11 +2206,14 @@ func (c *Controller) EnableInteractiveApproval() {
 	trustGate := planModeReadOnlyTrustApprover{c}
 	escapeApprover := sandboxEscapeApprover{c}
 	configApprover := managedConfigWriteApprover{c}
+	c.writeAccess.interactive = true
 	if c.executor != nil {
 		c.executor.SetGate(c.newInteractiveGate())
 		c.executor.SetPlanModeReadOnlyTrustGate(trustGate)
 		c.executor.SetSandboxEscapeApprover(escapeApprover)
 		c.executor.SetConfigWriteApprover(configApprover)
+		c.executor.SetWriteAccessGate(c)
+		c.executor.SetWriteRoots(c.writeAccess.roots)
 		c.executor.SetAsker(c)
 	}
 	if setter, ok := c.runner.(interface {
@@ -2237,6 +2230,16 @@ func (c *Controller) EnableInteractiveApproval() {
 		SetConfigWriteApprover(tool.ConfigWriteApprover)
 	}); ok {
 		setter.SetConfigWriteApprover(configApprover)
+	}
+	if setter, ok := c.runner.(interface {
+		SetWriteAccessGate(agent.WriteAccessGate)
+	}); ok {
+		setter.SetWriteAccessGate(c)
+	}
+	if setter, ok := c.runner.(interface {
+		SetWriteRoots(*sandbox.WritableRootSet)
+	}); ok {
+		setter.SetWriteRoots(c.writeAccess.roots)
 	}
 	if setter, ok := c.runner.(interface {
 		SetPlannerPlanApprover(agent.PlannerPlanApprover)
@@ -2380,8 +2383,11 @@ func (c *Controller) ApplyHeadlessApprovalMode(mode string) {
 	if c.subagentGate != nil {
 		c.subagentGate.Update(mode)
 	}
+	c.writeAccess.interactive = false
 	if c.executor != nil {
 		c.executor.SetGate(c.newHeadlessGate(mode))
+		c.executor.SetWriteAccessGate(c)
+		c.executor.SetWriteRoots(c.writeAccess.roots)
 	}
 }
 
@@ -2643,27 +2649,30 @@ func (c *Controller) SetPlanMode(v bool) {
 	c.applyPlanMode(v)
 }
 
-// SetAgentPreset is a deprecated compatibility shim. Reasonix runs one
-// adaptive standard execution; the preset no longer exists at runtime. The
-// call is accepted, validated for diagnostics, and ignored: it never rebuilds
-// the agent, never changes tool schemas, and never alters planning,
-// verification, or review behavior.
+// SetAgentPreset writes the role through to the session quality floor:
+// delivery/deliver/quality set the delivery floor, everything valid folds to
+// standard, unknown values are ignored for compat. It never rebuilds the
+// agent and never changes tool schemas.
 func (c *Controller) SetAgentPreset(preset string) {
 	if c == nil {
 		return
 	}
-	_ = agentpreset.Normalize(preset)
+	if p, err := agentpreset.Normalize(preset); err == nil {
+		_ = c.SetQualityFloor(string(p))
+	}
 }
 
-// AgentPreset returns the fixed compatibility label. One-version-old clients
-// read it from status snapshots; new code must not branch on it.
+// AgentPreset returns the session role label derived from the quality floor.
 func (c *Controller) AgentPreset() string {
-	return string(agentpreset.Balanced)
+	if c.QualityFloor() == QualityFloorDelivery {
+		return string(agentpreset.Delivery)
+	}
+	return string(agentpreset.Standard)
 }
 
 func (c *Controller) applyPlanMode(v bool) {
 	c.mu.Lock()
-	c.planMode = v
+	c.sessionSettings.planMode = v
 	c.mu.Unlock()
 	if setter, ok := c.runner.(interface{ SetPlanMode(bool) }); ok {
 		setter.SetPlanMode(v)
@@ -2707,7 +2716,7 @@ func (c *Controller) SetReasoningLanguage(lang string) {
 func (c *Controller) PlanMode() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.planMode
+	return c.sessionSettings.planMode
 }
 
 // GoalStrict enables or disables strict goal mode. Since the structured
@@ -3005,6 +3014,7 @@ func (c *Controller) NewSession() error {
 	c.hooks.SetSessionID(c.parentSessionID())
 	c.enqueueHookContexts(c.hooks.SessionStart(context.Background(), "clear"))
 	c.extensionSessionEvent(extension.PointSessionStart, dispatch.PhaseStart, c.SessionPath())
+	c.clearSessionWriteAccess()
 	return nil
 }
 
@@ -3098,6 +3108,7 @@ func (c *Controller) ClearSession() error {
 	c.hooks.SetSessionID(c.parentSessionID())
 	c.enqueueHookContexts(c.hooks.SessionStart(context.Background(), "clear"))
 	c.extensionSessionEvent(extension.PointSessionStart, dispatch.PhaseStart, c.SessionPath())
+	c.clearSessionWriteAccess()
 	if destroy.Async {
 		go func() {
 			result := destroy.Wait()
@@ -3284,6 +3295,9 @@ func (c *Controller) forkNamedReady(turn int, name string, switchToFork bool) (s
 	if err := sess.SaveIfAbsent(newPath); err != nil {
 		return "", c.rewindFail(err)
 	}
+	if _, err := sess.CopyValidContextProjection(parentPath, newPath); err != nil {
+		slog.Warn("controller: fork did not inherit context projection", "err", err)
+	}
 	forkPreview, forkTurns := agent.SessionPreviewFromMessages(forked)
 	if err := agent.SaveBranchMeta(newPath, agent.BranchMeta{
 		Name:             strings.TrimSpace(name),
@@ -3307,9 +3321,9 @@ func (c *Controller) forkNamedReady(turn int, name string, switchToFork bool) (s
 		c.sessionPath = newPath
 		c.guardianPath = guardian.PathFor(newPath)
 		c.mu.Unlock()
-		// New lineage: rebind sidecar path and clear any in-memory projection
-		// without deleting the parent session's .context.json.
-		c.bindExecutorProjection(newPath, false)
+		// Load the child sidecar when the covered prefix survived the fork. The
+		// loader rebinds its lineage key without touching the parent's sidecar.
+		c.bindExecutorProjection(newPath, true)
 		c.ResetPlannerSession()
 		c.setActiveJobSession(newPath)
 		c.rebindCheckpoints(newPath)
@@ -3375,6 +3389,9 @@ func (c *Controller) Branch(name string) (string, error) {
 	if err := sess.SaveIfAbsent(newPath); err != nil {
 		return "", c.rewindFail(err)
 	}
+	if _, err := sess.CopyValidContextProjection(parentPath, newPath); err != nil {
+		slog.Warn("controller: branch did not inherit context projection", "err", err)
+	}
 	branchPreview, branchTurns := agent.SessionPreviewFromMessages(branched)
 	if err := agent.SaveBranchMeta(newPath, agent.BranchMeta{
 		Name:             strings.TrimSpace(name),
@@ -3397,7 +3414,7 @@ func (c *Controller) Branch(name string) (string, error) {
 	c.sessionPath = newPath
 	c.guardianPath = guardian.PathFor(newPath)
 	c.mu.Unlock()
-	c.bindExecutorProjection(newPath, false)
+	c.bindExecutorProjection(newPath, true)
 	c.ResetPlannerSession()
 	c.setActiveJobSession(newPath)
 	c.rebindCheckpoints(newPath)
@@ -4400,7 +4417,7 @@ func (c *Controller) stripCancelledVisibleTurnMessagesAfterWithFallbackAt(idx in
 			i++
 			continue
 		}
-		if end, ok := completeToolTurnEnd(msgs, i); ok {
+		if end, ok := completeToolTurnEnd(msgs, i); ok && c.executor.CanReplayAssistantMessage(m) {
 			next = append(next, msgs[i:end]...)
 			for k, call := range m.ToolCalls {
 				if toolResultWasInterrupted(msgs[i+1+k].Content) {
@@ -5391,7 +5408,14 @@ func (c *Controller) InheritLifecycleFrom(prev *Controller) {
 // for carrying into a replacement controller across a rebuild — see
 // RestoreSessionAuthorizations.
 func (c *Controller) SessionAuthorizations() SessionAuthorizations {
-	return c.approval.snapshotSessionAuthorizations()
+	auth := c.approval.snapshotSessionAuthorizations()
+	if c.writeAccess.roots != nil {
+		auth.WriteRoots = c.writeAccess.roots.SessionRoots()
+		if auth.WriteRoots == nil {
+			auth.WriteRoots = []string{}
+		}
+	}
+	return auth
 }
 
 // RestoreSessionAuthorizations re-applies session authorizations captured
@@ -5400,6 +5424,9 @@ func (c *Controller) SessionAuthorizations() SessionAuthorizations {
 // replacement forgets every grant the user already made this session.
 func (c *Controller) RestoreSessionAuthorizations(auth SessionAuthorizations) {
 	c.approval.restoreSessionAuthorizations(auth)
+	if c.writeAccess.roots != nil && len(auth.WriteRoots) > 0 {
+		c.writeAccess.roots.GrantVerifiedSession(auth.WriteRoots)
+	}
 }
 
 // ReleaseResources stops plugin subprocesses and releases resources without
@@ -5530,11 +5557,17 @@ func (c *Controller) CancelJob(id string) bool {
 	return c.jobs.KillForSession(c.parentSessionID(), id)
 }
 
-// WorkspaceLeaseState reports only whether this controller owns or is waiting
-// for the Delivery workspace writer lease. It never exposes filesystem or
-// process identity.
+// WorkspaceLeaseState reports the process-local held and waiting lease scope.
+// Canonical keys are used only for matching another local controller and are
+// never copied into user-facing payloads.
 func (c *Controller) WorkspaceLeaseState() workspacelease.State {
 	return c.workspaceLease.State()
+}
+
+// WorkspaceLeaseHeldKeys is the lock-domain identity this controller currently
+// holds. Empty when no write lease is held.
+func (c *Controller) WorkspaceLeaseHeldKeys() []string {
+	return c.workspaceLease.HeldKeys()
 }
 
 // SetToolApprovalMode changes the runtime approval posture for permission-gated

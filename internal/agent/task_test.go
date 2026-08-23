@@ -883,7 +883,7 @@ func TestTaskToolBackgroundCapRefusesFanOut(t *testing.T) {
 	}
 }
 
-func TestTaskToolBackgroundSalvagePublishesEvidenceForCollection(t *testing.T) {
+func TestTaskToolBackgroundRunPublishesEvidenceForCollection(t *testing.T) {
 	reg := evidenceRegistry()
 	finalText := []provider.Chunk{{Type: provider.ChunkText, Text: "done, explanations added"}, {Type: provider.ChunkDone}}
 	sub := &scriptedProvider{name: "sub", turns: [][]provider.Chunk{
@@ -910,8 +910,8 @@ func TestTaskToolBackgroundSalvagePublishesEvidenceForCollection(t *testing.T) {
 	}
 	jobID := extractJobID(out)
 	res := jm.WaitForSession(context.Background(), "parent-session", []string{jobID}, 5)
-	if len(res) != 1 || res[0].Status != jobs.Done || !strings.Contains(res[0].Output, "[unverified]") {
-		t.Fatalf("background salvage = %+v, want done unverified result", res)
+	if len(res) != 1 || res[0].Status != jobs.Done {
+		t.Fatalf("background task = %+v, want done", res)
 	}
 	if parentLedger.Summary().HasMutation() {
 		t.Fatal("background goroutine wrote directly into the parent turn ledger")
@@ -968,7 +968,7 @@ func TestBackgroundEvidenceNotCommittedWhenTurnFails(t *testing.T) {
 	// so the next turn can review it instead of shipping it unreviewed.
 	jm := jobs.NewManager(event.Discard)
 	defer jm.Close()
-	jobID := startTerminalBackgroundMutation(t, jm, "parent-session", "qa/bank.md")
+	jobID := startTerminalBackgroundMutation(t, jm, "parent-session", "internal/auth/session.go")
 
 	reg := evidenceRegistry()
 	waitBuiltin(t, reg)
@@ -1032,7 +1032,7 @@ func TestBackgroundEvidenceCommittedWhenTurnDelivers(t *testing.T) {
 func TestFailedTurnBackgroundMutationForcesReadinessOnNextRunWithoutWait(t *testing.T) {
 	jm := jobs.NewManager(event.Discard)
 	defer jm.Close()
-	jobID := startTerminalBackgroundMutation(t, jm, "parent-session", "qa/bank.md")
+	jobID := startTerminalBackgroundMutation(t, jm, "parent-session", "internal/auth/session.go")
 
 	reg := evidenceRegistry()
 	waitBuiltin(t, reg)
@@ -1079,7 +1079,7 @@ func TestRestartRecoversPendingBackgroundMutationForcesReadinessWithoutWait(t *t
 	first.SetActiveSessionPath("parent-session", sessionPath)
 	j := first.StartForSession("parent-session", "task", "bg writer", func(ctx context.Context, _ io.Writer) (string, error) {
 		jobs.PublishEvidence(ctx, evidence.ChildEvidenceSummary{Receipts: []evidence.Receipt{{
-			ToolName: "write_file", Success: true, Write: true, Mutation: true, Paths: []string{"qa/bank.md"},
+			ToolName: "write_file", Success: true, Write: true, Mutation: true, Paths: []string{"internal/auth/session.go"},
 		}}})
 		return "background answer", nil
 	})

@@ -67,6 +67,7 @@ func TestRemoveEnvFileDeletesKeyAndUnsetsProcessEnv(t *testing.T) {
 
 func TestLegacyHomeEnvProviderKeyIsNotPromoted(t *testing.T) {
 	home := isolateDesktopUserDirs(t)
+	t.Setenv("REASONIX_HOME", filepath.Join(home, "current-reasonix"))
 	homeEnv := filepath.Join(home, ".env")
 	if err := os.WriteFile(homeEnv, []byte("DEEPSEEK_API_KEY=sk-test\nNPM_TOKEN=secret\n"), 0o600); err != nil {
 		t.Fatal(err)

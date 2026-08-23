@@ -69,12 +69,12 @@ reasoning_language = "auto"      # visible reasoning text: auto|zh|en
 # max_subagent_depth = 2              # nested delegation depth; set 1 for the old single-layer boundary
 # max_subagent_concurrency = 6        # session-wide sub-agent concurrency (task/fleet/skills)
 # max_parallel_writers = 3            # concurrent writers with non-overlapping write_paths
-# compact_ratio = 0.85             # sole auto trigger; presets 0.70 / 0.80 / 0.85
-# max_output_tokens = 0            # recommended: official DeepSeek omits the field (server 384K)
-# max_output_tokens = 32768        # optional cost cap
+# compact_ratio = 0.80             # sole auto trigger; presets 0.70 / 0.80 / 0.85
+# max_output_tokens = 0            # auto: official DeepSeek omits the field (server 384K) until the window is tight
+# max_output_tokens = 32768        # optional cost cap; still clipped to physical remaining
 # max_output_tokens = 65536        # optional cost cap
-# max_output_tokens = 131072       # optional cost cap
-# max_output_tokens never changes compact_ratio; only the final send-time clip does
+# max_output_tokens = -1           # force-omit the wire field; compact if the known auto budget no longer fits
+# max_output_tokens never changes compact_ratio; 0 is the provider auto value, not "skip local checks"
 
 [[providers]]
 name        = "deepseek-flash"
@@ -409,7 +409,16 @@ usually needs only the provider API key: the key value is stored in Reasonix hom
 environment-variable name, context window, vision model metadata, proxy bypass
 for China-only endpoints, MiniMax `reasoning_split`, GLM/MiniMax thinking
 heuristics, Anthropic-compatible Bearer auth where needed, Ollama Cloud
-max-effort support, and OpenCode Go per-model reasoning overrides. The dedicated
+max-effort support, and OpenCode Go per-model reasoning overrides. Official DeepSeek Anthropic, Responses, and Chat Completions catalogs also
+include `deepseek-v4-flash-vision-exp`. In Settings, mark that SKU for image
+input with the same checkbox used by other providers, then select it. Composer
+and `@` user images are sent as official visual input using the three documented
+shapes: inline base64 `data:` URLs for local files, `http(s)` image URLs as-is,
+and Files API `file-api-` ids (local images over 32 MiB on official DeepSeek are
+uploaded automatically). Chat Completions uses `image_url` or `file`, Anthropic
+uses `image`+`source.base64|url|file`, and Responses uses `input_image`.
+Flash and Pro stay text-only on the wire even if checked, and tool screenshots
+are not forwarded as image parts. The vision SKU uses the Flash rate card. The dedicated
 OpenCode Go DeepSeek Anthropic and DeepSeek Responses presets expose the verified
 Flash routes and enable provider-side `web_search` by default; the Responses
 variant uses stateless context replay. The existing mixed OpenCode Go Anthropic
@@ -590,7 +599,7 @@ Composer shortcuts:
 | `Cmd+Z` on macOS, `Ctrl+Z` on Windows/Linux | Undoes the latest composer edit | Native typing stays in the WebView history; Reasonix-managed paste, cut, folded blocks, and structured tokens are restored as complete transactions. |
 | `Cmd+Shift+Z` on macOS, `Ctrl+Shift+Z` on Windows/Linux | Redoes the latest composer edit | On Windows/Linux, `Ctrl+Y` is also accepted after the YOLO shortcut has been rebound. |
 | `Cmd+Y` / `Ctrl+Y` (default) | Toggles YOLO on/off | Turning YOLO off restores the previous Ask/Auto base when known. The current binding is shown in **Settings → Shortcuts**. |
-| `Cmd+V` on macOS, `Ctrl+V` on Windows/Linux | Pastes clipboard content | Clipboard images are attached; images can also be dropped into the composer. |
+| `Cmd+V` on macOS, `Ctrl+V` on Windows/Linux | Pastes clipboard content | Clipboard images are attached; images can also be dropped into the composer. Official DeepSeek Flash/Pro stay text-only; switch to `deepseek-v4-flash-vision-exp` to send those images. |
 | Plain `Up` / `Down` at the prompt boundary | Recalls older or newer submitted prompts | Modified arrows and native text navigation stay with the textarea. |
 | `Esc` while a turn is running | Cancels the running turn | If the turn has not produced a response yet, the draft is restored. |
 
@@ -721,10 +730,17 @@ The sandbox remains a second boundary after authorization; confinement cannot
 make ambiguous command parsing safe to authorize automatically.
 
 Permissions are *policy* (which calls to allow / prompt). The **sandbox** is
-*enforcement*: the file-writers (`write_file` / `edit_file` / `multi_edit` / `move_file`)
+*enforcement*: they are two layers. A permitted call still cannot write outside
+the approved roots. The file-writers (`write_file` / `edit_file` / `multi_edit` / `move_file`)
 refuse any path outside `[sandbox] workspace_root` (default: the current dir, so
 edits stay in the project), resolving symlinks and `..` so a link can't tunnel
-out. `forbid_read` optionally hides sensitive files or directories from the agent's
+out. Writing outside the workspace is an interactive *extend write access*
+approval (once / this session / add to project `reasonix.toml` / deny), not a
+sandbox escape. Bash must name those directories with `additional_write_dirs`
+plus a `justification`; the host does not infer paths from the command text.
+Headless `reasonix run` does not prompt: pass `--add-dir` or configure
+`[sandbox].allow_write`. The whole home directory can be approved with a
+high-risk warning; the filesystem root and Reasonix session/state paths cannot. `forbid_read` optionally hides sensitive files or directories from the agent's
 read/list/search tools; use absolute paths or `${HOME}` / `${VAR}` references,
 not `~`, because config expansion is environment-variable based. `bash` is
 itself jailed by default when an OS sandbox is available (`[sandbox] bash`,
@@ -1192,6 +1208,14 @@ read-only: an explicit old path can be recovered as an ordinary Goal, but new
 runs never create or update those directories. Deprecated budget flags are
 accepted for compatibility but are hidden from help and completion.
 
+### Ordered batch sign-offs
+
+The host may process multiple `complete_step` calls from one provider tool-call
+round. They must follow the canonical Todo order, and each step's work and
+evidence must already exist before its sign-off call. The host advances the
+Todo state after each successful call; skipped, pending, or out-of-order steps
+remain rejected. This does not change the provider-visible tool schema.
+
 ## @ references
 
 Embed `@` references in a message and Reasonix resolves them before sending, as
@@ -1219,36 +1243,33 @@ The planner sees loaded `REASONIX.md` / `AGENTS.md` memory and a small read-only
 research tool set, so it can inspect relevant files before handing a plan to the
 executor. Writer and workflow tools remain executor-only.
 
-Reasonix routes each turn deterministically without another classifier model:
-questions, short follow-ups, clear atomic edits, and bounded read-only actions
-go straight to the executor; bounded implementation work may receive a short
-light plan. Ambiguous, cross-surface, structured, high-risk, active-Goal, or
-closed-loop work receives a full plan unless the request is clearly atomic or
-read-only. Explicit Plan Mode
-remains a separate host workflow and is never planned twice. An explicit
-`plan first` / `先规划` request forces planning, while `just do it` / `直接改`
-goes directly to the executor. Execution boundaries are recognized across the
-request, not only at its beginning, while quoted examples are ignored. Bare
-plan-first requests continue from the planner to the executor automatically.
-Requests that explicitly say to wait for confirmation pause at the host
-approval boundary and continue to the executor after approval. Only an
-explicit `plan only` / `不要执行` request ends the
+Reasonix routes each turn deterministically without another classifier model.
+Ordinary requests always stay with the executor. The dedicated planner runs
+only for an explicit `plan first` / `先规划` request, an explicit wait-for-
+approval boundary, an explicit `plan only` / `不要执行` request, or Goal
+start. Wording such as "complex refactor" or "fix login" does not start the
+planner. There is no automatic planning depth. Explicit Plan Mode
+remains a separate host workflow on the executor and is never planned twice.
+`just do it` / `直接改` also stays with the executor. Execution boundaries are
+recognized across the request, not only at its beginning, while quoted
+examples are ignored. Bare plan-first requests continue from the planner to
+the executor automatically. Requests that explicitly say to wait for
+confirmation pause at the host approval boundary and continue to the executor
+after approval. Only an explicit `plan only` / `不要执行` request ends the
 current turn with the plan persisted and no execution; a later user instruction
-can continue in the same session. The phase detail records a privacy-safe route,
-depth, and reason code for diagnosis without logging the user prompt.
+can continue in the same session. The phase detail records a privacy-safe route
+and reason code for diagnosis without logging the user prompt.
 
-Light plans contain a compact objective, at most four ordered steps, likely
-touchpoints, and the main verification. Full plans distinguish verified from
-candidate touchpoints and add relevant non-goals, risks, acceptance criteria,
-command-level verification, and rollback guidance when the operation is hard to
-reverse. These contracts are part of one stable planner system prompt; only the
-small per-turn depth instruction is appended to the user turn, preserving the
-planner's prefix cache after the one-time prompt upgrade. The host also gives
-light and full research different per-turn round budgets. If a planner still
-does not finalize after its bounded research and finalization round, ordinary
-plan-and-execute work continues with the executor using the original task.
-Plan-only and approval-gated requests remain fail-closed, and the incomplete
-planner turn is rolled back instead of leaving an unusable continuation tail.
+The planner uses one stable system prompt. A small host-authored
+`<planner-turn>` block names the explicit route and preserves the planner
+prefix cache after the one-time prompt upgrade. The plan should separate
+verified from candidate touchpoints and include non-goals, risks, acceptance
+criteria, and command-level verification when evidence supports them. If a
+planner still does not finalize after its bounded research and finalization
+round, ordinary plan-and-execute work continues with the executor using the
+original task. Plan-only and approval-gated requests remain fail-closed, and
+the incomplete planner turn is rolled back instead of leaving an unusable
+continuation tail.
 
 Reasonix manages normal execution automatically: if an active todo produces no
 new completion, unique read, command, or mutation for 8 tool-call rounds, the
@@ -1388,34 +1409,45 @@ is narrower than the dedicated Planner: the Planner accepts authorized opaque
 non-destructive MCP, while a strict child requires an explicit reader hint and
 never exposes writers at all.
 
-Reasonix runs a single adaptive **standard execution**: planning depth,
-verification breadth, and independent review follow the task's risk
-automatically, per turn.
+Reasonix uses **fact-driven execution**. Ordinary requests always enter the
+executor. There is no automatic task mode. The one session role is the quality floor: standard (default) or delivery; facts can still raise it. Planner,
+Goal, permission, sandbox, and the task contract are independent states.
+
+For an explicit write request, Standard gives the executor up to 12 bounded
+follow-up turns when no successful mutation has been observed, when a
+`todo_write` created during the current task still has unfinished items after a
+mutation, or when the assistant explicitly promises another implementation
+action after a mutation without creating a task todo. New host-observed progress
+resets the stall counter; two consecutive follow-ups without new progress pause
+the task. Repeating the same read, command, result, or prose does not qualify as
+progress. Historical canonical todos remain visible but do not block a new
+ordinary task, and a completed or cleared current-task todo remains authoritative.
+Standard still treats verification, review, and sign-off gaps as completion
+attention rather than Delivery-strength automatic closure. If the bounded
+follow-ups are exhausted, Reasonix pauses with a recoverable "Task is not
+complete" result and preserves the current evidence for `/continue-checks`.
 
 Every task shares the same provider-visible core tool surface: direct
 read/bash/edit/write, background-shell lifecycle tools, `ask`/`compress` when
 registered, and the stable `use_capability` proxy for optional tools (search,
 MCP, skills, subagents, docs, web_fetch, and so on). Calling `use_capability`
 never expands the top-level provider schema, so the prompt-cache tool prefix
-stays stable across every task.
+stays stable across every task. The Harness minimal preset is not a task
+complexity mode.
 
-What adapts is host policy, not the tool list:
+The model decides whether to investigate, write todos, or spawn a sub-agent.
+The host then builds verification obligations from the actual tool call, the
+real target path, and the execution receipt:
 
-- Conversation and advisory turns run direct with no auxiliary model calls.
-- Plain read-only queries cite their actual reads (targeted evidence).
-- Single-file, anchored, low-risk modifications run direct with a
-  zero-extra-model-call Atomic TaskContract and targeted checks.
-- Multi-file same-surface work gets a light plan, project-level checks, and a
-  conditional independent review that escalates to forced when coverage is weak.
-- Cross-module, public-interface, persistence, security/permission/migration/
-  release, and active-Goal work get a full plan, full checks, forced independent
-  review (plus security review for safety classes), and the full evidence
-  closed loop: acceptance criteria before state changes, verification after the
-  latest mutation, review, and sign-off with `complete_step`. Missing evidence
-  ends the turn Partial, Unverified, or Blocked — never Complete.
-- Risk only ratchets upward within a turn: when receipts show the change set
-  touched high-risk surfaces or outgrew the initial judgment, the policy
-  escalates and the missing verification/review is still demanded.
+- A read-only call creates no obligation.
+- A local docs, i18n, fixture, or style edit is advisory targeted verification.
+- A single production-file edit is recoverable targeted verification plus
+  diff review.
+- Multi-file or unclear local writes require a todo and criteria first.
+- Schema, migration, public-interface, auth, or destructive work becomes
+  strict verification, review, and sign-off after the write is observed.
+- Goal items and approved Plan criteria are always strict.
+- Prompt words such as OAuth or token never create action risk by themselves.
 
 Meta tools such as `task`, `run_skill`, and `review` are not counted as mutations
 by themselves — only real child writes are. Read-only analysis remains available

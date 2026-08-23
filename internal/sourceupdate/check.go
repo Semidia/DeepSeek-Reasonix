@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"reasonix/internal/proc"
 )
 
 const (
@@ -46,7 +48,7 @@ type GitRunner interface {
 type execGitRunner struct{}
 
 func (execGitRunner) Run(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := proc.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {

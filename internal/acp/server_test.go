@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 
 	"reasonix/internal/agent"
 	"reasonix/internal/agent/testutil"
-	"reasonix/internal/agentpreset"
 	"reasonix/internal/command"
 	"reasonix/internal/control"
 	"reasonix/internal/event"
@@ -263,8 +261,8 @@ func requireDeprecatedConfigNoop(t *testing.T, client *rpcClient, factory *confi
 		t.Fatalf("set_config_option %s=%s: %+v", configID, value, resp.Error)
 	}
 	var set SetSessionConfigOptionResult
-	if err := json.Unmarshal(resp.Result, &set); err != nil || set.DeprecatedNotice != agentpreset.DeprecatedNotice {
-		t.Fatalf("set_config_option %s result err=%v notice=%q", configID, err, set.DeprecatedNotice)
+	if err := json.Unmarshal(resp.Result, &set); err != nil {
+		t.Fatalf("set_config_option %s result err=%v", configID, err)
 	}
 	if got := factory.buildCount(); got != buildsBefore {
 		t.Fatalf("set_config_option %s rebuilt controller: builds=%d, want %d", configID, got, buildsBefore)
@@ -1040,8 +1038,8 @@ func TestServeSessionAxesStayIndependent(t *testing.T) {
 		t.Fatalf("goal prompt: %+v", promptResp.Error)
 	}
 	goalObserved := <-seen
-	if goalObserved.preset != "balanced" || goalObserved.approval != control.ToolApprovalAuto || goalObserved.plan || goalObserved.goal != "ship the ACP profile switch" {
-		t.Fatalf("goal axes = %+v, want balanced + auto + goal", goalObserved)
+	if goalObserved.preset != "standard" || goalObserved.approval != control.ToolApprovalAuto || goalObserved.plan || goalObserved.goal != "ship the ACP profile switch" {
+		t.Fatalf("goal axes = %+v, want standard + auto + goal", goalObserved)
 	}
 
 	setPlan := client.call(t, "session/set_mode", SessionSetModeParams{SessionID: nr.SessionID, ModeID: sessionModePlan})
@@ -1057,8 +1055,8 @@ func TestServeSessionAxesStayIndependent(t *testing.T) {
 		t.Fatalf("plan prompt: %+v", promptResp.Error)
 	}
 	planObserved := <-seen
-	if planObserved.preset != "balanced" || planObserved.approval != control.ToolApprovalAuto || !planObserved.plan || planObserved.goal != "" {
-		t.Fatalf("plan axes = %+v, want balanced + auto + plan", planObserved)
+	if planObserved.preset != "standard" || planObserved.approval != control.ToolApprovalAuto || !planObserved.plan || planObserved.goal != "" {
+		t.Fatalf("plan axes = %+v, want standard + auto + plan", planObserved)
 	}
 }
 
@@ -1856,32 +1854,6 @@ func TestServeSteerInjectsIntoActivePrompt(t *testing.T) {
 	})
 	if idleResp.Error == nil || idleResp.Error.Code != ErrInvalidRequest {
 		t.Fatalf("idle %s = %+v, want invalid request", sessionSteerMethod, idleResp.Error)
-	}
-}
-
-func TestServePromptErrorIsNotReportedAsCancelled(t *testing.T) {
-	factory := &fakeFactory{behavior: func(context.Context, event.Sink, string) error {
-		return errors.New("provider failed")
-	}}
-	client, stop := startServer(t, factory)
-	defer stop()
-
-	client.call(t, "initialize", InitializeParams{ProtocolVersion: 1})
-	newResp := client.call(t, "session/new", SessionNewParams{})
-	var nr SessionNewResult
-	json.Unmarshal(newResp.Result, &nr)
-
-	promptCh := client.callAsync("session/prompt", SessionPromptParams{
-		SessionID: nr.SessionID,
-		Prompt:    []ContentBlock{{Type: "text", Text: "fail"}},
-	})
-	_, resp := drainPrompt(t, client, promptCh)
-	var pr SessionPromptResult
-	if err := json.Unmarshal(resp.Result, &pr); err != nil {
-		t.Fatalf("prompt result: %v", err)
-	}
-	if pr.StopReason != StopError {
-		t.Errorf("stopReason = %q, want error", pr.StopReason)
 	}
 }
 

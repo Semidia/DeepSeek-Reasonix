@@ -70,7 +70,8 @@ func TestWindowsWebView2SmokeUsesExternalProductionBinaryContract(t *testing.T) 
 		`$HealthySeconds consecutive seconds`,
 		`$process.CloseMainWindow()`,
 		`$process.WaitForExit(10000)`,
-		`taskkill.exe /PID $process.Id /T /F`,
+		`taskkill.exe /PID $processId /T /F`,
+		`Stop-NativeSmokeProcessTree -RootProcessId $process.Id -OwnedProcessIds $ownedProcessIds`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("Windows WebView2 smoke is missing production-binary contract %q", want)

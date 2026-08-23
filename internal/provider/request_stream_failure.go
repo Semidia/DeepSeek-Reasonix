@@ -1,6 +1,19 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// StreamOrRequestError converts an ambiguous post-write transport failure into
+// a stream error so only the Agent, not the provider retry loop, owns recovery.
+func StreamOrRequestError(ctx context.Context, err error) (<-chan Chunk, error) {
+	var requestErr *RequestError
+	if errors.As(err, &requestErr) && requestErr.RequestMayHaveReachedServer {
+		return StreamFailure(ctx, err), nil
+	}
+	return nil, err
+}
 
 // StreamFailure returns a channel carrying a transport failure that happened
 // after the request may have reached the provider. The Agent owns replay of

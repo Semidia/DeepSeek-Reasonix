@@ -19,7 +19,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
-	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	// Blank imports wire compile-time built-ins into their registries, exactly as
 	// cmd/reasonix does — boot.Build resolves providers/tools from these registries.
@@ -82,6 +81,9 @@ func windowsWebview2GPUDisabled() bool {
 }
 
 func linuxWebviewGpuPolicy(pattern string) linux.WebviewGpuPolicy {
+	if linuxRendererCompatibilityMode() {
+		return linux.WebviewGpuPolicyNever
+	}
 	matches, err := filepath.Glob(pattern)
 	if err == nil {
 		for _, path := range matches {
@@ -103,6 +105,7 @@ func preparePrimaryDesktopRuntime(app *App) {
 }
 
 func main() {
+	prepareLinuxRendererCompatibilityEnvironment()
 	// Detached macOS self-update child: wait for the old PID, hold the shared
 	// repair mutation lock, then swap the .app bundle. Must run before Wails.
 	if handled, exitCode := maybeRunMacUpdateHandoff(os.Args[1:]); handled {
@@ -119,8 +122,9 @@ func main() {
 	appMenu := app.createAppMenu()
 	dragAndDrop := &options.DragAndDrop{EnableFileDrop: true}
 	bindings := []any{app}
+	remoteWindow := launch.RemoteWindowTicket != ""
 
-	if launch.RemoteWindowTicket != "" {
+	if remoteWindow {
 		// A remote web child window: a second Reasonix process that hosts the
 		// SSH Serve page for one remote host. It deliberately skips local
 		// runtimes (tabs, tray, heartbeat, providers) and exposes no Wails
@@ -145,7 +149,7 @@ func main() {
 		defer app.releaseDesktopDiagnosticsOwnership()
 	}
 
-	width, height := initialDesktopWindowSize()
+	width, height := initialDesktopWindowSize(remoteWindow)
 
 	// Restore saved desktop zoom factor (WebView2 ZoomFactor), or default to 1.0.
 	zoomFactor := 1.0
@@ -161,7 +165,7 @@ func main() {
 		Title:     title,
 		Width:     width,
 		Height:    height,
-		Frameless: goruntime.GOOS == "windows",
+		Frameless: desktopWindowFrameless(goruntime.GOOS, remoteWindow),
 		Logger:    newCrashCaptureLogger(app),
 		MinWidth:  760,
 		MinHeight: 480,
@@ -206,14 +210,7 @@ func main() {
 			// preference instead of being locked to dark.
 			Appearance: mac.DefaultAppearance,
 		},
-		Windows: &windows.Options{
-			// Follow the OS theme so the title bar matches light/dark system
-			// preference instead of being locked to dark.
-			Theme:                windows.SystemDefault,
-			ZoomFactor:           zoomFactor,
-			WebviewGpuIsDisabled: windowsWebview2GPUDisabled(),
-			WebviewUserDataPath:  webview2UserDataPath(),
-		},
+		Windows: desktopWindowsOptions(zoomFactor),
 		Linux: &linux.Options{
 			ProgramName: "Reasonix",
 			// WebKitGTK GPU compositing is inconsistent across distros/drivers and

@@ -7,40 +7,26 @@ import (
 	"testing"
 
 	"reasonix/internal/evidence"
-	"reasonix/internal/taskpolicy"
+	"reasonix/internal/runtimepolicy"
+	"reasonix/internal/taskcontract"
 	"reasonix/internal/tool"
 )
 
-func closedLoopTurnPolicy(review taskpolicy.Review) taskpolicy.TaskPolicy {
-	return taskpolicy.TaskPolicy{
-		Evidence: taskpolicy.EvidenceClosedLoop,
-		Review:   review,
-	}
-}
-
+// A closed-loop turn is a delivery-floor turn: the floor alone arms the
+// readiness pause, so the scope on its own no longer produces one.
 func withClosedLoopContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return taskpolicy.WithContext(ctx, closedLoopTurnPolicy(taskpolicy.ReviewForced))
-}
-
-func noClosedLoopPolicy() taskpolicy.TaskPolicy {
-	return taskpolicy.TaskPolicy{
-		// Pin risk at the ceiling so escalatePolicyFromEvidence cannot
-		// RaiseRisk and reevaluate floors into a closed loop.
-		Risk:         taskpolicy.RiskHigh,
-		Evidence:     taskpolicy.EvidenceNone,
-		Review:       taskpolicy.ReviewNone,
-		Verification: taskpolicy.VerifyNone,
-	}
+	ctx = runtimepolicy.WithContext(ctx, runtimepolicy.Constraints{PolicyFloor: taskcontract.PolicyFloorDelivery})
+	return WithDeliveryExecutionScope(ctx, DeliveryExecutionScope{ID: "test-closed-loop", TaskText: "closed-loop test"})
 }
 
 func withNoClosedLoop(ctx context.Context) context.Context {
 	if ctx == nil {
-		ctx = context.Background()
+		return context.Background()
 	}
-	return taskpolicy.WithContext(ctx, noClosedLoopPolicy())
+	return ctx
 }
 
 func TestClosedLoopReviewGateExplainsOpaqueMutationRecovery(t *testing.T) {
@@ -58,7 +44,7 @@ func TestClosedLoopReviewGateExplainsOpaqueMutationRecovery(t *testing.T) {
 	a := &Agent{
 		task: taskRuntime{ledger: ledger},
 		svc:  agentServices{tools: reg},
-		turn: turnRuntime{policySet: true, policy: closedLoopTurnPolicy(taskpolicy.ReviewForcedSecurity)},
+		turn: turnRuntime{deliveryScopeActive: true},
 	}
 
 	got := a.deliveryReviewGateFailure()
@@ -117,7 +103,7 @@ func TestClosedLoopReviewGateHighRiskStillRequiresSecurityReview(t *testing.T) {
 	a := &Agent{
 		task: taskRuntime{ledger: ledger},
 		svc:  agentServices{tools: reg},
-		turn: turnRuntime{policySet: true, policy: closedLoopTurnPolicy(taskpolicy.ReviewForcedSecurity)},
+		turn: turnRuntime{deliveryScopeActive: true},
 	}
 
 	if got := a.deliveryReviewGateFailure(); !strings.Contains(got, "high-risk") {
@@ -160,7 +146,7 @@ func TestClosedLoopReviewGateMediumAcceptsHostProvenVerificationAndCoverage(t *t
 	a := &Agent{
 		task: taskRuntime{ledger: ledger},
 		svc:  agentServices{tools: reg},
-		turn: turnRuntime{policySet: true, policy: closedLoopTurnPolicy(taskpolicy.ReviewForced)},
+		turn: turnRuntime{deliveryScopeActive: true},
 	}
 	if got := a.deliveryReviewGateFailure(); got != "" {
 		t.Fatalf("medium-risk host proof was rejected: %q", got)
@@ -186,7 +172,7 @@ func TestClosedLoopReviewGateDefersToParentInSubagents(t *testing.T) {
 		agentConfig: agentConfig{subagentDepth: 1},
 		task:        taskRuntime{ledger: ledger},
 		svc:         agentServices{tools: reg},
-		turn:        turnRuntime{policySet: true, policy: closedLoopTurnPolicy(taskpolicy.ReviewForcedSecurity)},
+		turn:        turnRuntime{deliveryScopeActive: true},
 	}
 
 	// Inside a sub-agent the structured-review contract belongs to the parent,

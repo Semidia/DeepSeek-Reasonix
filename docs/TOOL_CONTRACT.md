@@ -99,6 +99,19 @@ same-name shared client is rejected without process, network, or tool dispatch.
 The fixed proxy's provider-visible name, description, schema, and ordering do
 not change when MCP inventory changes.
 
+When the current frontend has a session reader, the same fixed proxy also lists
+the read-only `session:tool_result` capability. It pages the complete local copy
+of one tool result by UTF-8 byte offset without adding a top-level schema. Calls
+require `tool_call_id`; new truncation markers also provide a stable
+`result_ref`, which is required to disambiguate repeated call IDs. `offset`
+defaults to 0, `limit` defaults to 16KiB and is capped at 24KiB. Each response
+starts with `result_ref`, actual offset, `next_offset`, `total_bytes`, full
+SHA-256, and `complete`, followed by the raw page. The reader is bound to the
+current Agent session and is not inherited from a parent when a capability
+frontend is cloned. A restricted child that already has `use_capability` may
+read only its own results; an allowed-tools profile without the proxy is not
+widened.
+
 `ask`, `docs`, `explore`, `fleet`, `forget`, `history`, `install_skill`, `install_source`,
 `list_sessions`, `lsp_definition`, `lsp_diagnostics`, `lsp_hover`,
 `lsp_references`, `memory`, `parallel_tasks`, `read_only_skill`,
@@ -113,8 +126,8 @@ without injecting every report into the parent context at once. References are
 restricted to the current conversation lineage and workspace.
 
 `use_capability` (`action` = `list` | `inspect` | `call` | `decline`) is on the
-provider-visible surface for every task. The adaptive standard execution derives
-policy from task risk. Optional tools stay registered for host dispatch but are not
+provider-visible surface for every task. Host verification obligations come
+from real tool actions, not from preclassifying the prompt. Optional tools stay registered for host dispatch but are not
 expanded into the top-level provider schema; the model reaches them through
 `use_capability` without cache-breaking schema churn.
 

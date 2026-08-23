@@ -10,6 +10,16 @@ import (
 	"reasonix/internal/sourceupdate"
 )
 
+func TestSourceUpdateHelpReturnsSuccess(t *testing.T) {
+	var exit int
+	stdout, _ := captureCLIOutput(t, func() {
+		exit = Run([]string{"source-update", "--help"}, "test")
+	})
+	if exit != 0 || !strings.Contains(stdout, "reasonix source-update --check") {
+		t.Fatalf("exit = %d, stdout = %q, want source-update help", exit, stdout)
+	}
+}
+
 func TestSourceUpdateCommandRequiresExplicitCheck(t *testing.T) {
 	stderr := captureStderr(t, func() {
 		if code := sourceUpdateCommand([]string{"--root", "D:/src"}); code != 2 {

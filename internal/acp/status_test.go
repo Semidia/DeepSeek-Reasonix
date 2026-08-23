@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"reasonix/internal/agent"
-	"reasonix/internal/agentpreset"
 	"reasonix/internal/billing"
+	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
 )
@@ -220,6 +220,7 @@ func TestStatusExtensionTracksMultipleSessionsAndUsage(t *testing.T) {
 }
 
 func TestStatusNormalizesPhaseAndRedactsPublicText(t *testing.T) {
+	const opaqueSecret = "readinessSecretAbc123"
 	telemetry := newStatusTelemetry()
 	telemetry.beginTurn()
 	telemetry.onEvent(event.Event{Kind: event.Phase, Source: event.UsageSourcePlanner, Text: "planner · private stage label"})
@@ -232,7 +233,7 @@ func TestStatusNormalizesPhaseAndRedactsPublicText(t *testing.T) {
 	}
 	telemetry.finishTurn(&agent.FinalReadinessError{
 		Attempts: 1,
-		Reason:   "token=secret-reason",
+		Reason:   "token=secret-reason credential " + opaqueSecret,
 		Missing:  []string{"api_key=secret-risk"},
 	}, false, "running", "authorization: bearer secret-summary")
 	snapshot := telemetry.snapshot()
@@ -243,7 +244,7 @@ func TestStatusNormalizesPhaseAndRedactsPublicText(t *testing.T) {
 	if strings.Contains(string(encoded), "secret-") || !strings.Contains(string(encoded), "[redacted]") {
 		t.Fatalf("status text was not redacted: %s", encoded)
 	}
-	if strings.Contains(snapshot.turnOutcome.Reason, "secret-") {
+	if strings.Contains(snapshot.turnOutcome.Reason, "secret-") || strings.Contains(snapshot.turnOutcome.Reason, opaqueSecret) {
 		t.Fatalf("turn outcome was not redacted: %q", snapshot.turnOutcome.Reason)
 	}
 
@@ -263,6 +264,28 @@ func TestRestoreStatusNormalizesLegacyPresentationPhase(t *testing.T) {
 	})
 	if got := restored.snapshot().phase; got != "implementing" {
 		t.Fatalf("restored phase = %q, want implementing", got)
+	}
+}
+
+func TestRestoreStatusStronglyRedactsLegacyTurnOutcome(t *testing.T) {
+	const opaqueSecret = "readinessSecretAbc123"
+	const bearerSecret = "bearerSecretAbc123"
+	restored := restoreStatusTelemetry(&persistedStatusTelemetry{
+		TurnOutcome: ReasonixTurnOutcome{
+			Kind:   "error",
+			Reason: "credential " + opaqueSecret + " Authorization: Bearer " + bearerSecret,
+		},
+	})
+
+	snapshot := restored.snapshot()
+	persisted := restored.persisted()
+	for name, reason := range map[string]string{
+		"public snapshot":  snapshot.turnOutcome.Reason,
+		"repersisted data": persisted.TurnOutcome.Reason,
+	} {
+		if strings.Contains(reason, opaqueSecret) || strings.Contains(reason, bearerSecret) {
+			t.Errorf("%s leaked a legacy credential: %q", name, reason)
+		}
 	}
 }
 
@@ -297,7 +320,7 @@ func TestRestoreStatusMarksInterruptedTurnPaused(t *testing.T) {
 	}
 }
 
-func TestStatusWorkModeSetConfigOptionIsDeprecatedNoop(t *testing.T) {
+func TestStatusWorkModeSetConfigOptionSwitchesQualityFloor(t *testing.T) {
 	factory := &runtimeTrackingFactory{configurableFactory: &configurableFactory{}}
 	client, stop := startServer(t, factory)
 	defer stop()
@@ -321,8 +344,18 @@ func TestStatusWorkModeSetConfigOptionIsDeprecatedNoop(t *testing.T) {
 		if err := json.Unmarshal(resp.Result, &set); err != nil {
 			t.Fatalf("set work mode %q result: %v", value, err)
 		}
-		if set.DeprecatedNotice != agentpreset.DeprecatedNotice {
-			t.Fatalf("set work mode %q deprecatedNotice = %q", value, set.DeprecatedNotice)
+		want := control.QualityFloorStandard
+		if value == "delivery" {
+			want = control.QualityFloorDelivery
+		}
+		var floorOpt *SessionConfigOption
+		for i := range set.ConfigOptions {
+			if set.ConfigOptions[i].ID == "quality_floor" {
+				floorOpt = &set.ConfigOptions[i]
+			}
+		}
+		if floorOpt == nil || floorOpt.CurrentValue != want {
+			t.Fatalf("quality floor option after work_mode %q = %+v, want %q", value, floorOpt, want)
 		}
 		status := getStatus(t, client, sessionID)
 		if status.WorkMode != "balanced" || status.PlannerMode != "on" {
