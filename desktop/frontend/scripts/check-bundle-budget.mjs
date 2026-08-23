@@ -18,7 +18,7 @@ function initialAssetPaths(extension) {
 }
 
 function formatKiB(bytes) {
-  return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024).toFixed(3)} KiB`;
 }
 
 function assertBudget(label, actual, budget) {

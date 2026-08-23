@@ -2725,7 +2725,7 @@ export const en = {
   "settings.providerProtocolAnthropicHint": "For Claude-style Messages API services such as some coding-plan endpoints.",
   "settings.providerBaseUrlLabel": "API address",
   "settings.providerChatUrlPlaceholder": "e.g. https://api.openai.com/v1/chat/completions",
-  "settings.providerRequestUrlHint": "Enter a site root, /v1 base, or full request address. Roots and /v1 are completed with /chat/completions; custom paths stay unchanged.",
+  "settings.providerRequestUrlHint": "Root URLs and /v1 gain /chat/completions; full request URLs stay unchanged.",
   "settings.providerApiKeyEnvHint": "Generated from the provider name by default; change it only when you need a fixed env var name.",
   "settings.providerKey": "Key",
   "settings.providerKeyOptional": "Key",
