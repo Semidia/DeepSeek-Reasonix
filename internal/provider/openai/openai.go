@@ -101,6 +101,10 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		visionDetail = "" // auto — omit the field
 	}
 	deepseek := protocol == "deepseek" || (protocol == "" && officialDeepSeek)
+	// Third-party OpenAI-compatible gateways often expose a DeepSeek V4 model
+	// without declaring the wire protocol. Keep their ordinary OpenAI request
+	// shape, but still honor DeepSeek's tool-turn reasoning replay contract.
+	deepseekReplay := deepseek || (protocol == "" && configuredThinkingType(cfg) != "disabled" && expectsDeepSeekToolCallReasoning(cfg.Model, ""))
 	maxOutputTokens, _ := cfg.Extra["max_output_tokens"].(int)
 	deepseekV4Model := strings.EqualFold(strings.TrimSpace(cfg.Model), "deepseek-v4-flash") ||
 		strings.EqualFold(strings.TrimSpace(cfg.Model), "deepseek-v4-pro") ||
@@ -241,6 +245,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		extraBody:       cleanExtraBody(extraBody),
 		model:           normalizeModelID(cfg.BaseURL, cfg.Model),
 		deepseek:        deepseek,
+		deepseekReplay:  deepseekReplay,
 		minimax:         minimax,
 		zhipu:           zhipu,
 		longcat:         longcat,
@@ -280,6 +285,7 @@ type client struct {
 	model           string
 	http            *http.Client
 	deepseek        bool
+	deepseekReplay  bool          // true when tool-call history must replay reasoning_content
 	minimax         bool          // true for api.minimaxi.com — emits MiniMax-M3's thinking knob instead of reasoning_effort
 	zhipu           bool          // true for Zhipu GLM (bigmodel.cn / z.ai) — gates thinking via thinking.type, ignores reasoning_effort
 	longcat         bool          // true for LongCat — gates thinking via thinking.type, ignores reasoning_effort
@@ -301,7 +307,7 @@ func (c *client) RequiresToolCallReasoning() bool {
 	if c == nil || c.thinkingType == "disabled" {
 		return false
 	}
-	if c.deepseek {
+	if c.deepseek || c.deepseekReplay {
 		return true
 	}
 	// Generic OpenAI-compatible gateways can explicitly opt into the
@@ -721,7 +727,7 @@ func (c *client) buildRequest(req provider.Request) chatRequest {
 				// Kimi K3 requires the complete assistant message on multi-turn
 				// and tool-call requests, including provider-issued reasoning.
 				cm.ReasoningContent = &m.ReasoningContent
-			case (c.deepseek || c.RequiresToolCallReasoning()) && len(m.ToolCalls) > 0:
+			case (c.deepseek || c.deepseekReplay || c.RequiresToolCallReasoning()) && len(m.ToolCalls) > 0:
 				if c.RequiresToolCallReasoning() || m.ReasoningContent != "" {
 					cm.ReasoningContent = &m.ReasoningContent
 				}
