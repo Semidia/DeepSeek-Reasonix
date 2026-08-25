@@ -79,6 +79,26 @@ request as merged until the upstream repository shows that state.
 
 ## Latest public verification
 
+The current scattered source branch integrates the upstream `v1.31.3` stable
+source baseline and keeps the local fixes as separate, reviewable commits.
+The corresponding source-built desktop and CLI artifacts share the same
+source revision and are deployed outside this repository. The CLI exposes
+`version --json`, redacted `doctor --json`, `session list --json`, and the
+read-only `source-update --check --json` contract.
+
+The Windows launcher keeps the update check, exact-path process stop, isolated
+environment setup, and desktop start in a PowerShell entry point. The batch
+file is only a dispatcher so `cmd.exe` parsing cannot split embedded
+PowerShell commands. When the check returns `upstream-update`, the launcher
+reports that an upstream change was detected and still starts the scattered
+build; it does not fetch, merge, install, or replace anything.
+
+The v1.31.3 integration passed the focused provider, CLI, desktop, WebView2,
+source-update, `go vet`, repository lint, frontend type, frontend lint, CSS,
+scroll-writer, and bundle-budget checks used by this branch. Full GUI control
+automation and a live third-party provider conversation remain separate
+runtime checks and are not implied by these source-level results.
+
 The 2026-08-15 source-update adapter fix detects a refused loopback proxy and
 retries the read-only GitHub check once without proxy variables. The fallback
 requires all three signals: a proxy-related error, a loopback address, and an

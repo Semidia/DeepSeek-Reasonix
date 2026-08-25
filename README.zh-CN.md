@@ -63,6 +63,8 @@
 更新监控和报告规则。每次公开推送都在
 [`docs/scattered-build/updates/`](./docs/scattered-build/updates/) 下新增一份带日期的报告。
 
+当前散装版源码分支已合入官方 `v1.31.3` 稳定基线。桌面端和 CLI 都从审查后的同一源码提交自主构建；CLI 提供脱敏诊断、会话列表和只读上游源码更新检查。Windows 启动器检测到上游变化时只提示，不会自动拉取、合并、安装或替换运行数据。
+
 ## 特性
 
 - **配置驱动**：provider、agent、启用的工具、插件全部在 `reasonix.toml` 中声明，

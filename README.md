@@ -67,6 +67,13 @@ build, isolation, update-monitoring, and reporting rules. Each public push adds
 one dated report under
 [`docs/scattered-build/updates/`](./docs/scattered-build/updates/).
 
+The current scattered source branch integrates the upstream `v1.31.3` stable
+baseline. Desktop and CLI artifacts are rebuilt from the reviewed source
+commit; the CLI includes redacted diagnostics, session listing, and a
+read-only upstream source update check. The Windows launcher reports detected
+upstream changes but does not automatically fetch, merge, install, or replace
+runtime data.
+
 ## Features
 
 - **Config-driven.** Providers, the agent, enabled tools, and plugins are all
