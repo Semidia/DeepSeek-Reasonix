@@ -80,6 +80,29 @@ func TestBuildRequestDeepSeekModelGatewayReplaysToolCallReasoningByDefault(t *te
 	}
 }
 
+func TestBuildRequestDeepSeekFreeModelGatewayReplaysToolCallReasoningByDefault(t *testing.T) {
+	p, err := New(provider.Config{
+		Name: "deepseek-relay", BaseURL: "https://gateway.example/v1", Model: "DeepSeek-V4-Flash[free]", APIKey: "k",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !provider.RequiresToolCallReasoning(p) || !provider.AllowsEmptyReasoningFallback(p) {
+		t.Fatal("a DeepSeek V4 free-model relay must preserve tool-call reasoning history")
+	}
+	req := p.(*client).buildRequest(provider.Request{Messages: []provider.Message{
+		{Role: provider.RoleAssistant, ReasoningContent: "read first", ToolCalls: []provider.ToolCall{{ID: "c1", Name: "read_file", Arguments: `{}`}}},
+		{Role: provider.RoleTool, ToolCallID: "c1", Name: "read_file", Content: "result"},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c2", Name: "read_file", Arguments: `{}`}}},
+	}})
+	if got := req.Messages[0].ReasoningContent; got == nil || *got != "read first" {
+		t.Fatalf("free-model provider-issued reasoning_content = %v, want exact replay", got)
+	}
+	if got := req.Messages[2].ReasoningContent; got == nil || *got != "" {
+		t.Fatalf("free-model missing reasoning_content fallback = %v, want explicit empty string", got)
+	}
+}
+
 func TestBuildRequestExplicitOpenAIProtocolOptsOutOfDeepSeekModelReplay(t *testing.T) {
 	p, err := New(provider.Config{
 		Name: "openai-relay", BaseURL: "https://gateway.example/v1", Model: "deepseek-v4-flash", APIKey: "k",
@@ -132,7 +155,7 @@ func TestStreamDeepSeekModelGatewayAvoidsMissingReasoning400(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := New(provider.Config{Name: "deepseek-relay", BaseURL: srv.URL, Model: "deepseek-v4-flash", APIKey: "k"})
+	p, err := New(provider.Config{Name: "deepseek-relay", BaseURL: srv.URL, Model: "DeepSeek-V4-Flash[free]", APIKey: "k"})
 	if err != nil {
 		t.Fatal(err)
 	}
