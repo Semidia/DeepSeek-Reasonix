@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { Archive, GitBranch, Pencil, Search, Trash2, RotateCcw } from "lucide-react";
+import { Archive, GitBranch, Link, Pencil, Search, Trash2, RotateCcw } from "lucide-react";
 import { app } from "../lib/bridge";
+import { copyTopicDeepLink } from "../lib/deepLink";
 import { t, useT } from "../lib/i18n";
 import { historySessionDisplayTitle, sessionActivityTime } from "../lib/session";
 import type { HistoryMessage, HistorySearchContextLine, HistorySearchHit, RecoveryLineageView, SessionMeta } from "../lib/types";
@@ -328,6 +329,27 @@ export function HistoryPanel({
               startRename(target);
             },
           },
+          ...(menuSession.topicId
+            ? [
+                {
+                  key: "copy-deep-link",
+                  icon: <Link size={13} />,
+                  label: tr("history.copyDeepLink"),
+                  onSelect: () => {
+                    const target = menuSession;
+                    closeHistoryMenus();
+                    void (async () => {
+                      const ok = await copyTopicDeepLink(target);
+                      if (ok) {
+                        showToast(tr("history.deepLinkCopied"), "info");
+                      } else {
+                        showToast(tr("history.deepLinkCopyFailed"), "error");
+                      }
+                    })();
+                  },
+                } as ContextMenuItem,
+              ]
+            : []),
           ...(menuSession.topicId
             ? [
                 {

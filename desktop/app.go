@@ -28,6 +28,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"reasonix/internal/agent"
@@ -199,6 +200,12 @@ type App struct {
 	// the pre-restore empty tab map would treat every saved tab's session as
 	// closed and could overwrite desktop-tabs.json with an empty snapshot.
 	tabsRestored chan struct{}
+
+	// deepLinks is the buffered queue of reasonix:// URLs arriving from this
+	// process's argv (first launch) or the single-instance handoff (already
+	// running). They are drained only after tabs are restored so activation can
+	// reuse or open a tab against a populated tab map.
+	deepLinks chan string
 
 	// projectTreeChangedHook is test-only: set once before any concurrency
 	// starts, then read lock-free from emitProjectTreeChanged (whose callers
@@ -423,6 +430,7 @@ func NewApp() *App {
 		botRuntime:           newDesktopBotRuntime(),
 		remoteWindows:        newRemoteWindowRegistry(),
 		remoteWindowOwnerID:  newRemoteWindowOwnerID(),
+		deepLinks:            make(chan string, deepLinkQueueDepth),
 	}
 	a.desktopShell.trayState = "probing"
 	a.webView2Recovery = newWebView2RecoveryCoordinator(a)
@@ -479,6 +487,11 @@ func (a *App) startup(ctx context.Context) {
 	a.goSafe("applyWindowIconsFromExecutable", func() {
 		applyWindowIconsFromExecutable()
 	})
+	a.goSafe("registerDeepLinkProtocol", func() {
+		if err := registerDeepLinkProtocol(); err != nil {
+			slog.Debug("desktop: register reasonix protocol", "err", err)
+		}
+	})
 
 	if cfg, err := config.Load(); err == nil && cfg.DesktopMetrics() && version != "dev" {
 		a.metrics.Store(newMetricsAggregator(config.MemoryUserDir()))
@@ -495,6 +508,9 @@ func (a *App) startup(ctx context.Context) {
 	a.tabsRestored = make(chan struct{})
 	a.mu.Unlock()
 	go a.restoreOrBuildTabs()
+	// Deep links queue while tabs restore; activation starts once the gate
+	// closes so it never races the empty pre-restore tab map.
+	go a.deepLinkReadyLoop()
 	a.registerHistoryIndexEvents()
 	a.startSessionCatalog(false)
 	a.goSafe("refreshBotRuntime", a.refreshBotRuntime)
@@ -626,8 +642,63 @@ func (a *App) showMainWindow() {
 	a.showMainWindowFrom("menu")
 }
 
-func (a *App) secondInstanceLaunch() {
+func (a *App) secondInstanceLaunch(data options.SecondInstanceData) {
+	// A second launch can carry a reasonix:// URL the OS protocol handler passed
+	// to the new process; the single-instance lock reuses this process instead.
+	for _, arg := range data.Args {
+		if isDeepLinkArg(arg) {
+			a.queueDeepLink(arg)
+		}
+	}
 	a.showMainWindowFrom("second_instance")
+}
+
+// queueDeepLink enqueues a reasonix:// URL for activation once tabs restore.
+// Non-blocking by design: a flood of stale links must never wedge startup.
+func (a *App) queueDeepLink(raw string) {
+	select {
+	case a.deepLinks <- raw:
+	default:
+		slog.Debug("desktop: deep link queue full, dropping", "url", raw)
+	}
+}
+
+// deepLinkReadyLoop drains queued deep links after tab restore, then continues
+// consuming links forwarded by later second-instance launches.
+func (a *App) deepLinkReadyLoop() {
+	defer a.recoverToPending("deepLinkReadyLoop")
+	<-a.tabsRestoredSignal()
+	for raw := range a.deepLinks {
+		a.consumeDeepLink(raw)
+	}
+}
+
+// consumeDeepLink parses, validates, and activates one reasonix:// topic link.
+// Failures are surfaced to the frontend so the user sees why nothing opened.
+func (a *App) consumeDeepLink(raw string) {
+	topic, err := parseDeepLink(raw)
+	if err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	if err := topic.validateTarget(); err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	meta, err := a.ActivateTopic(topic.Scope, topic.WorkspaceRoot, topic.TopicID, "")
+	if err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	a.emitRuntimeEvent(deepLinkActivatedChannel, map[string]string{
+		"scope": topic.Scope,
+		"topic": topic.TopicID,
+		"tab":   meta.ID,
+	})
+}
+
+func (a *App) emitDeepLinkFailure(message string) {
+	a.emitRuntimeEvent(deepLinkErrorChannel, map[string]string{"error": message})
 }
 
 func (a *App) quitApp() {

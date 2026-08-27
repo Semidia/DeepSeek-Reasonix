@@ -149,6 +149,12 @@ func main() {
 		defer app.releaseDesktopDiagnosticsOwnership()
 	}
 
+	// Queue a protocol-handler deep link for activation once tabs restore. The
+	// remote web-window child never activates local topics, so skip it there.
+	if launch.DeepLink != "" && !remoteWindow {
+		app.queueDeepLink(launch.DeepLink)
+	}
+
 	width, height := initialDesktopWindowSize(remoteWindow)
 
 	// Restore saved desktop zoom factor (WebView2 ZoomFactor), or default to 1.0.
@@ -244,6 +250,9 @@ type desktopLaunchOptions struct {
 	// that owner and its loopback SSH tunnel disappear.
 	RemoteWindowOwnerID   string
 	RemoteWindowParentPID int
+	// DeepLink is a reasonix:// URL passed as argv by the OS protocol handler.
+	// It is queued for activation once tabs finish restoring.
+	DeepLink string
 }
 
 func parseDesktopLaunchArgs(args []string) desktopLaunchOptions {
@@ -262,6 +271,10 @@ func parseDesktopLaunchArgs(args []string) desktopLaunchOptions {
 			out.RemoteWindowOwnerID = strings.TrimPrefix(arg, remoteWindowOwnerArgPrefix)
 		case strings.HasPrefix(arg, remoteWindowParentArgPrefix):
 			out.RemoteWindowParentPID, _ = strconv.Atoi(strings.TrimPrefix(arg, remoteWindowParentArgPrefix))
+		default:
+			if isDeepLinkArg(arg) {
+				out.DeepLink = arg
+			}
 		}
 	}
 	return out
