@@ -139,8 +139,10 @@ for (const path of localeChunks) {
   // platform-dependent gate. The OpenCode one-key setup adds product-level
   // connection, fallback, and legacy-state copy while removing protocol
   // choices from the primary UI; keep that complete guidance with a bounded
-  // 0.4–0.5 KiB locale-only ratchet.
-  const budget = name.startsWith("zh-TW-") ? 57.2 * 1024 : 56.5 * 1024;
+  // 0.4–0.5 KiB locale-only ratchet. The deep-link history action adds three
+  // copy-status labels (~0.04 KiB gzip) to simplified Chinese; keep the
+  // per-locale ratchet narrow instead of abbreviating the message.
+  const budget = name.startsWith("zh-TW-") ? 57.3 * 1024 : 56.6 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
@@ -155,7 +157,9 @@ const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
 // More menu, completion summary) makes the latest-base merge 2353.1 KiB in
 // production and 2358.3 KiB in test: about 9.0 KiB (0.38%) over main-v2's
 // channel gates. Retain that attributable UI capacity with 0.1 KiB of build-SHA
-// headroom without widening the gzip or largest-chunk exceptions.
-const rawInitialBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 2_358.4 : 2_353.2;
+// headroom without widening the gzip or largest-chunk exceptions. The deep-link
+// history action adds a lazy clipboard+URL helper; the measured production
+// build drifts 0.01 KiB over the prior gate on build-SHA noise alone.
+const rawInitialBudgetKiB = process.env.REASONIX_CHANNEL === "test" ? 2_358.4 : 2_353.3;
 assertBudget("initial raw JavaScript and CSS", rawInitialBytes, rawInitialBudgetKiB * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);
