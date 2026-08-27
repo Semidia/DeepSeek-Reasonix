@@ -83,22 +83,28 @@ const eventChannel = "agent:event"
 const singleInstanceIDPrefix = "com.reasonix.desktop"
 
 // singleInstanceID is used by Wails to route a second desktop launch back to the
-// process that owns the same Reasonix data home. Basing the identity on the
-// executable path let installed, portable, stable, and canary binaries write the
-// same sessions concurrently. Explicit REASONIX_HOME isolation still produces
-// an independent instance; REASONIX_DEV continues to bypass the lock entirely.
+// existing process. The identity is now based on the executable path so that any
+// launch of the same binary (regardless of REASONIX_HOME) shares the single-
+// instance lock. This ensures that OS-level protocol invocations (e.g., browser
+// deep links) route to the running instance instead of creating a new one.
+// Explicit REASONIX_HOME isolation no longer produces an independent instance;
+// use REASONIX_DEV=1 to bypass the lock entirely.
 func singleInstanceID() string {
-	root := strings.TrimSpace(config.ReasonixHomeDir())
-	if root == "" {
+	exe, err := os.Executable()
+	if err != nil {
 		return singleInstanceIDPrefix
 	}
-	// Reuse the lease path canonicalizer so a missing home below a symlink or
-	// junction still hashes to the same physical data directory.
-	if marker := agent.CanonicalSessionPath(filepath.Join(root, ".reasonix-home.identity")); marker != "" {
-		root = filepath.Dir(marker)
+	return singleInstanceIDForPath(exe)
+}
+
+// singleInstanceIDForPath hashes a canonical executable path into the lock key.
+// Split out from singleInstanceID so tests can exercise path canonicalization
+// without spawning a real process.
+func singleInstanceIDForPath(exe string) string {
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = filepath.Clean(resolved)
 	}
-	root = filepath.Clean(root)
-	sum := sha256.Sum256([]byte(root))
+	sum := sha256.Sum256([]byte(exe))
 	return singleInstanceIDPrefix + "." + hex.EncodeToString(sum[:8])
 }
 

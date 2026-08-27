@@ -31,18 +31,18 @@ func TestSingleInstanceLockRestoresExistingInstance(t *testing.T) {
 	lock.OnSecondInstanceLaunch(options.SecondInstanceData{})
 }
 
-func TestSingleInstanceIDScopesToReasonixHome(t *testing.T) {
-	first := filepath.Join(t.TempDir(), "first")
-	second := filepath.Join(t.TempDir(), "second")
-	t.Setenv("REASONIX_HOME", first)
-	firstID := singleInstanceID()
-	t.Setenv("REASONIX_HOME", filepath.Join(first, "."))
-	if got := singleInstanceID(); got != firstID {
-		t.Fatalf("same data home produced different ids: %q != %q", got, firstID)
+// The lock now keys on the executable path so OS protocol invocations (which
+// do not inherit REASONIX_HOME) still route back to the running instance.
+func TestSingleInstanceIDScopesToExecutable(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "reasonix-desktop.exe")
+	second := filepath.Join(t.TempDir(), "reasonix-desktop.exe")
+	if firstID, secondID := singleInstanceIDForPath(first), singleInstanceIDForPath(second); firstID == secondID {
+		t.Fatalf("different executables produced the same id %q", firstID)
 	}
-	t.Setenv("REASONIX_HOME", second)
-	if got := singleInstanceID(); got == firstID {
-		t.Fatalf("different data homes produced the same id %q", got)
+	// Same path reached through a redundant "." component canonicalizes equal.
+	dotted := filepath.Join(first, "..", "reasonix-desktop.exe")
+	if got := singleInstanceIDForPath(dotted); got != singleInstanceIDForPath(first) {
+		t.Fatalf("canonically equal paths produced different ids: %q != %q", got, singleInstanceIDForPath(first))
 	}
 }
 
@@ -54,25 +54,25 @@ func TestSingleInstanceIDDoesNotSplitReleaseChannels(t *testing.T) {
 	stableID := singleInstanceID()
 	channel = "canary"
 	if got := singleInstanceID(); got != stableID {
-		t.Fatalf("same data home split by channel: stable=%q canary=%q", stableID, got)
+		t.Fatalf("same executable split by channel: stable=%q canary=%q", stableID, got)
 	}
 }
 
-func TestSingleInstanceIDResolvesMissingHomeThroughSymlink(t *testing.T) {
+// A symlink alias of the same executable canonicalizes to one lock key, so a
+// launch through a junctioned install path still routes to the running binary.
+func TestSingleInstanceIDResolvesAliasThroughSymlink(t *testing.T) {
 	root := t.TempDir()
-	realParent := filepath.Join(root, "real")
-	if err := os.MkdirAll(realParent, 0o755); err != nil {
+	real := filepath.Join(root, "reasonix-desktop.exe")
+	if err := os.WriteFile(real, []byte("placeholder"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	aliasParent := filepath.Join(root, "alias")
-	if err := os.Symlink(realParent, aliasParent); err != nil {
+	alias := filepath.Join(root, "alias.exe")
+	if err := os.Symlink(real, alias); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	t.Setenv("REASONIX_HOME", filepath.Join(realParent, "not-created", "home"))
-	realID := singleInstanceID()
-	t.Setenv("REASONIX_HOME", filepath.Join(aliasParent, "not-created", "home"))
-	if got := singleInstanceID(); got != realID {
-		t.Fatalf("aliased missing data home produced different ids: %q != %q", got, realID)
+	realID := singleInstanceIDForPath(real)
+	if got := singleInstanceIDForPath(alias); got != realID {
+		t.Fatalf("aliased executable produced different ids: %q != %q", got, realID)
 	}
 }
 
