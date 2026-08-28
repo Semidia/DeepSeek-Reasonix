@@ -5,9 +5,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
-import { Archive, ArrowDown, Pencil, Plus, Folder, FolderPlus, Search, BriefcaseBusiness, Copy, FolderOpen, XCircle, Check, ListCollapse, ListRestart, MessageSquare, Clock, Pin, MoreHorizontal, Minimize2, Maximize2, GitBranch, Sparkles } from "lucide-react";
+import { Archive, ArrowDown, Pencil, Plus, Folder, FolderPlus, Search, BriefcaseBusiness, Copy, FolderOpen, XCircle, Check, ListCollapse, ListRestart, MessageSquare, Clock, Link, Pin, MoreHorizontal, Minimize2, Maximize2, GitBranch, Sparkles } from "lucide-react";
 import { asArray } from "../lib/array";
 import { useToast } from "../lib/toast";
+import type { SessionMeta } from "../lib/sessionMetaTypes";
 import { app } from "../lib/bridge";
 import { onProjectTreeChangedV2 } from "../lib/sessionCatalogBridge";
 import { isRuntimeSessionNode, isTopicNode, loadWorkbenchOrganizeMode, loadWorkbenchSortMode, mergeIncompleteProjectTopicPage, mergeProjectTopicPage, projectTreeDedupedExactTime, projectTreeEventAffectsFolder, projectTreeFolderDisclosure, projectTreeReadActivityKey, projectTreeRevisionIsFresh, projectTreeShellChildren, projectTreeShellSignature, projectTreeShouldApplyShellSnapshot, projectTreeShouldRenderTopicActions, projectTreeShouldSuppressOpenForRename, projectTreeTopicArchiveBlocked, projectTreeTopicHasUnreadActivity, projectTreeTopicHoverCardModel, projectTreeTopicMenuOffersPin, projectTreeTopicMetaLine, projectTreeTopicOpenRequest, projectTreeTopicPageIsFresh, projectTreeTopicPageSignature, projectTreeTopicRecoveryCopyCount, projectTreeWithoutTopic, projectTreeWithTopicTitle, topicActivityAt, topicActivityDateLabel, topicActivityLabel, topicIsActive, topicStatus, topicStatusLabel, topicUnknownTimeLabel, WORKBENCH_ORGANIZE_KEY, WORKBENCH_SORT_KEY, type ProjectTreePendingTopicOpen, type ProjectTreeReadActivity, type ProjectTreeTopicHoverCard, type ProjectTreeVariant, type WorkbenchOrganizeMode, type WorkbenchSortMode } from "../lib/projectTreeTopic";
@@ -278,6 +279,7 @@ export function ProjectTree({
   const [menuTopic, setMenuTopic] = useState<string | null>(null);
   const [menuProject, setMenuProject] = useState<{ key: string; root: string; path: string; scope: "global" | "project"; label: string } | null>(null);
   const [menuPoint, setMenuPoint] = useState<ContextMenuPoint | null>(null);
+  const [menuSession, setMenuSession] = useState<{ path: string; scope: "global" | "project"; workspaceRoot: string } | null>(null);
   const [editingProject, setEditingProject] = useState<{ key: string; root: string } | null>(null);
   const [projectDraft, setProjectDraft] = useState("");
   const [isolatingProject, setIsolatingProject] = useState<string | null>(null);
@@ -309,10 +311,22 @@ export function ProjectTree({
     setMenuTopic(null);
     setMenuProject(null);
     setMenuPoint(null);
+    setMenuSession(null);
     setConfirmAction(null);
     setConfirmRemoveProject(null);
     setWorkbenchHeaderMenu(null);
   }, []);
+  // deepLink.ts stays in a lazy chunk (shared with HistoryPanel): importing it
+  // here statically would pull the clipboard+URL helper into the startup path.
+  const copyDeepLink = useCallback(async (session: SessionMeta) => {
+    const { copySessionDeepLink } = await import("../lib/deepLink");
+    const ok = await copySessionDeepLink(session);
+    if (ok) {
+      showToast(t("history.deepLinkCopied"), "info");
+    } else {
+      showToast(t("history.deepLinkCopyFailed"), "error");
+    }
+  }, [showToast, t]);
   const topicLoadSeqRef = useRef<Record<string, number>>({});
   const refreshRef = useRef<ProjectTreeRefresh>(async () => {});
   const { trashingTopics, currentArchiveTombstones, trashTopic } = useProjectTreeArchiveController({
@@ -1148,17 +1162,23 @@ export function ProjectTree({
           : "";
       const title = [node.preview || "", label, recoveryLabel, imSourceTitle, statusLabel, metaFull, projectTreeDedupedExactTime(metaFull, exactTimeLabel)].filter(Boolean).join(" · ");
       const topicMenuOpen = !isSessionNode && menuTopic === topicId;
+      const sessionMenuOpen = isSessionNode && menuSession !== null && menuSession.path === (node.sessionPath ?? "");
       const pinned = Boolean(node.pinned);
       const pinLabel = t(pinned ? "projectTree.unpinTopic" : "projectTree.pinTopic");
       const openTopicMenu = (event: ReactMouseEvent<HTMLElement> | ReactKeyboardEvent<HTMLElement>) => {
-        if (isSessionNode) return;
         event.preventDefault();
         event.stopPropagation();
         setMenuProject(null);
         setConfirmRemoveProject(null);
         setMenuPoint(contextMenuPointFromEvent(event));
-        setMenuTopic(topicId);
         setConfirmAction(null);
+        if (isSessionNode) {
+          setMenuTopic(null);
+          setMenuSession({ path: node.sessionPath ?? "", scope, workspaceRoot: openRequest?.workspaceRoot ?? "" });
+        } else {
+          setMenuTopic(topicId);
+          setMenuSession(null);
+        }
       };
       const topicMenuItems: ContextMenuItem[] = [
         ...organization.topicMenuItems(node, t),
@@ -1172,6 +1192,16 @@ export function ProjectTree({
               },
             ]
           : []),
+        {
+          key: "copy-deep-link",
+          icon: <Link size={13} />,
+          label: t("history.copyDeepLink"),
+          onSelect: () => {
+            closeMenu();
+            const target = { topicId, scope, workspaceRoot: openRequest?.workspaceRoot ?? "" } as SessionMeta;
+            void copyDeepLink(target);
+          },
+        },
         {
           key: "rename",
           icon: <Pencil size={13} />,
@@ -1194,6 +1224,18 @@ export function ProjectTree({
           onSelect: () => {
             if (confirmAction?.topicId === topicId && confirmAction.action === "trash") void trashTopic(topicId);
             else setConfirmAction({ topicId, action: "trash" });
+          },
+        },
+      ];
+      const sessionMenuItems: ContextMenuItem[] = [
+        {
+          key: "copy-deep-link",
+          icon: <Link size={13} />,
+          label: t("history.copyDeepLink"),
+          onSelect: () => {
+            closeMenu();
+            const target = { path: node.sessionPath ?? "", scope, workspaceRoot: openRequest?.workspaceRoot ?? "" } as SessionMeta;
+            void copyDeepLink(target);
           },
         },
       ];
@@ -1236,7 +1278,7 @@ export function ProjectTree({
           className={`project-tree__topic${scopeClass}${isSessionNode ? " project-tree__topic--session" : ""}${active ? " project-tree__topic--active" : ""}${node.running ? " project-tree__topic--running" : ""}${status ? ` project-tree__topic--status-${status}` : ""}${unread ? " project-tree__topic--unread" : ""}${!isSessionNode && pinned ? " project-tree__topic--pinned" : ""}${topicMenuOpen ? " project-tree__topic--menu-open" : ""}${topicDrag.className}${sideTimeVisible && (timeLabel || showStatusInSide || showWaitingPill) ? " project-tree__topic--with-side" : metaFull ? " project-tree__topic--has-meta" : ""}${imSource ? " project-tree__topic--im-source" : ""}${shortcutIndex > 0 ? " project-tree__topic--show-shortcut" : ""}`}
           style={accentStyle}
           {...topicDrag.props}
-          onContextMenu={isSessionNode ? undefined : openTopicMenu}
+          onContextMenu={openTopicMenu}
           onMouseEnter={classicTopics ? (event) => scheduleHoverCard(event.currentTarget, key, node) : undefined}
           onMouseLeave={classicTopics ? cancelHoverCard : undefined}
           onMouseDown={classicTopics ? cancelHoverCard : undefined}
@@ -1381,7 +1423,16 @@ export function ProjectTree({
               </Tooltip>
             </span>
           )}
-          {!isSessionNode && (
+          {isSessionNode ? (
+            <ContextMenu
+              open={sessionMenuOpen}
+              point={menuPoint}
+              items={sessionMenuItems}
+              minWidth={178}
+              ariaLabel={t("projectTree.topicActions")}
+              onClose={closeMenu}
+            />
+          ) : (
             <ContextMenu
               open={topicMenuOpen}
               point={menuPoint}

@@ -136,3 +136,110 @@ func TestIsDeepLinkArg(t *testing.T) {
 		t.Fatal("switch misdetected")
 	}
 }
+
+func TestParseSessionDeepLinkProject(t *testing.T) {
+	sessionPath := `D:\Reasonix\home\database\sessions\abc123.json`
+	root := `C:\work\demo`
+	raw := "reasonix://session/" + url.PathEscape(sessionPath) + "?scope=project&workspace=" + url.QueryEscape(root)
+	got, err := parseSessionDeepLink(raw)
+	if err != nil {
+		t.Fatalf("parseSessionDeepLink(%q): %v", raw, err)
+	}
+	if got.SessionPath != sessionPath {
+		t.Fatalf("SessionPath = %q, want %q", got.SessionPath, sessionPath)
+	}
+	if got.Scope != "project" {
+		t.Fatalf("Scope = %q, want project", got.Scope)
+	}
+	if got.WorkspaceRoot != root {
+		t.Fatalf("WorkspaceRoot = %q, want %q", got.WorkspaceRoot, root)
+	}
+}
+
+func TestParseSessionDeepLinkGlobal(t *testing.T) {
+	sessionPath := `D:\Reasonix\home\database\sessions\xyz.json`
+	raw := "reasonix://session/" + url.PathEscape(sessionPath) + "?scope=global"
+	got, err := parseSessionDeepLink(raw)
+	if err != nil {
+		t.Fatalf("parseSessionDeepLink: %v", err)
+	}
+	if got.SessionPath != sessionPath || got.Scope != "global" || got.WorkspaceRoot != "" {
+		t.Fatalf("unexpected parse: %+v", got)
+	}
+}
+
+func TestParseSessionDeepLinkRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want error
+	}{
+		{"empty", "", errDeepLinkBadScheme},
+		{"wrong scheme", "https://session/x?scope=global", errDeepLinkBadScheme},
+		{"wrong host", "reasonix://nope/x?scope=global", errDeepLinkBadHost},
+		{"topic host", "reasonix://topic/x?scope=global", errDeepLinkBadHost},
+		{"missing path", "reasonix://session/?scope=global", errDeepLinkBadSession},
+		{"no path", "reasonix://session?scope=global", errDeepLinkBadSession},
+		{"bad scope", "reasonix://session/x?scope=banana", errDeepLinkBadScope},
+		{"missing scope", "reasonix://session/x", errDeepLinkBadScope},
+		{"project no workspace", "reasonix://session/x?scope=project", errDeepLinkNoWorkspace},
+		{"global with workspace", "reasonix://session/x?scope=global&workspace=C%3A%5Cfoo", errDeepLinkBadParam},
+		{"unknown param", "reasonix://session/x?scope=global&token=secret", errDeepLinkBadParam},
+		{"corrupt url", "reasonix://session/%zz?scope=global", errDeepLinkBadScheme},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSessionDeepLink(tc.raw)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("parseSessionDeepLink(%q) = %v, want success", tc.raw, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("parseSessionDeepLink(%q) = %v, want %v", tc.raw, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSessionDeepLinkRejectsSecretParams(t *testing.T) {
+	for _, key := range []string{"session", "path", "token", "key", "body", "cookie", "auth"} {
+		raw := "reasonix://session/x?scope=global&" + key + "=secret"
+		if _, err := parseSessionDeepLink(raw); !errors.Is(err, errDeepLinkBadParam) {
+			t.Fatalf("param %q: got %v, want errDeepLinkBadParam", key, err)
+		}
+	}
+}
+
+func TestDeepLinkSessionValidateTarget(t *testing.T) {
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(sessionFile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		d    deepLinkSession
+		want bool
+	}{
+		{"global ok", deepLinkSession{Scope: "global", SessionPath: sessionFile}, true},
+		{"empty workspace", deepLinkSession{Scope: "project", WorkspaceRoot: "", SessionPath: sessionFile}, false},
+		{"relative workspace", deepLinkSession{Scope: "project", WorkspaceRoot: "relative/dir", SessionPath: sessionFile}, false},
+		{"missing dir", deepLinkSession{Scope: "project", WorkspaceRoot: filepath.Join(dir, "nope"), SessionPath: sessionFile}, false},
+		{"existing dir", deepLinkSession{Scope: "project", WorkspaceRoot: dir, SessionPath: sessionFile}, true},
+		{"missing session", deepLinkSession{Scope: "global", SessionPath: filepath.Join(dir, "nope.json")}, false},
+		{"session is dir", deepLinkSession{Scope: "global", SessionPath: dir}, false},
+		{"relative session", deepLinkSession{Scope: "global", SessionPath: "relative/session.json"}, false},
+		{"null byte", deepLinkSession{Scope: "global", SessionPath: dir + string(rune(0))}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.d.validateTarget()
+			if (err == nil) != tc.want {
+				t.Fatalf("validateTarget() = %v, want success=%v", err, tc.want)
+			}
+		})
+	}
+}

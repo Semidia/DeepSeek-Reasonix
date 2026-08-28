@@ -679,9 +679,31 @@ func (a *App) deepLinkReadyLoop() {
 	}
 }
 
-// consumeDeepLink parses, validates, and activates one reasonix:// topic link.
-// Failures are surfaced to the frontend so the user sees why nothing opened.
+// consumeDeepLink parses, validates, and activates one reasonix:// deep link.
+// Topic links activate a topic tab; session links create a blank tab in the
+// target scope and ask the frontend to resume the session file in it. Failures
+// are surfaced to the frontend so the user sees why nothing opened.
 func (a *App) consumeDeepLink(raw string) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	if !strings.EqualFold(u.Scheme, deepLinkScheme) {
+		a.emitDeepLinkFailure(errDeepLinkBadScheme.Error())
+		return
+	}
+	switch strings.ToLower(u.Host) {
+	case "topic":
+		a.consumeTopicDeepLink(raw)
+	case "session":
+		a.consumeSessionDeepLink(raw)
+	default:
+		a.emitDeepLinkFailure(errDeepLinkBadHost.Error())
+	}
+}
+
+func (a *App) consumeTopicDeepLink(raw string) {
 	topic, err := parseDeepLink(raw)
 	if err != nil {
 		a.emitDeepLinkFailure(err.Error())
@@ -700,6 +722,30 @@ func (a *App) consumeDeepLink(raw string) {
 		"scope": topic.Scope,
 		"topic": topic.TopicID,
 		"tab":   meta.ID,
+	})
+}
+
+// consumeSessionDeepLink opens the linked non-topic session: a blank tab is
+// created (and made visible) in the target scope/workspace, then the frontend
+// is told to resume the session file in that tab via the session-resume event.
+func (a *App) consumeSessionDeepLink(raw string) {
+	session, err := parseSessionDeepLink(raw)
+	if err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	if err := session.validateTarget(); err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	meta, err := a.ensureBlankSurface(session.Scope, session.WorkspaceRoot)
+	if err != nil {
+		a.emitDeepLinkFailure(err.Error())
+		return
+	}
+	a.emitRuntimeEvent(deepLinkSessionResumeChannel, map[string]string{
+		"tabID": meta.ID,
+		"path":  session.SessionPath,
 	})
 }
 

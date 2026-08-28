@@ -1572,6 +1572,25 @@ export default function App() {
       setSettingsTarget("general");
     });
   }, [closeTransientOverlays]);
+  // Resume a session from a session deep link (reasonix://session/...). Go
+  // creates the blank tab and emits this event with the tab ID; the frontend
+  // loads the session into that tab.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.runtime) return;
+    return window.runtime.EventsOn("deep-link:session-resume", (...data: unknown[]) => {
+      const payload = data[0] as { tabID: string; path: string } | undefined;
+      if (payload?.tabID && payload?.path) resumeSession(payload.path, payload.tabID);
+    });
+  }, [resumeSession]);
+  // Surface deep-link activation failures (bad scheme/host/scope, missing or
+  // foreign session path) as a toast so the user knows why nothing opened.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.runtime) return;
+    return window.runtime.EventsOn("deep-link:error", (...data: unknown[]) => {
+      const payload = data[0] as { error: string } | undefined;
+      if (payload?.error) showToast(payload.error, "error");
+    });
+  }, [showToast]);
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onResize = () => {
@@ -3832,6 +3851,12 @@ export default function App() {
         targetTab = await openTopicTarget("project", session.workspaceRoot, session.topicId, session.path);
       } else if (scope === "global" && session.topicId) {
         targetTab = await openTopicTarget("global", "", session.topicId, session.path);
+      } else if (session.path) {
+        // Non-topic session: open a blank tab in the session's scope and resume
+        // the session file in it (same flow as the bot sidebar resume).
+        targetTab = await openBlankTarget(scope === "project" ? "project" : "global", scope === "project" ? session.workspaceRoot || "" : "");
+        if (!latest()) return;
+        await resumeSession(session.path, targetTab.id, request.navigationIntentSeq);
       } else {
         throw new Error(scope === "global" && !session.topicId
           ? t("history.failedOpenSession")
