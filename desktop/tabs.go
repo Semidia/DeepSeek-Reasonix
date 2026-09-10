@@ -7811,6 +7811,7 @@ func (a *App) saveTabSessionMeta(tab *WorkspaceTab, path string) error {
 		topicID:          tab.TopicID,
 		topicTitle:       tab.TopicTitle,
 		tokenMode:        currentTabTokenMode(tab),
+		qualityFloor:     strings.TrimSpace(tab.qualityFloor),
 		mode:             normalizeTabMode(tab.mode),
 		toolApprovalMode: normalizeToolApprovalMode(tab.toolApprovalMode),
 		goal:             strings.TrimSpace(tab.goal),

@@ -91,3 +91,60 @@ func TestTabSessionProfileFromMetaFoldsLegacyLight(t *testing.T) {
 		t.Fatalf("legacy light must fold to standard, got %q", profile.qualityFloor)
 	}
 }
+
+// SetQualityFloorForTab must mirror the delivery floor into the session's
+// branch-meta sidecar, not only the tabs file. The rebuild path
+// (tabSessionProfileFromMeta) reads the sidecar, so a restart or reattach
+// otherwise loses the user's explicit delivery choice and the UI falls back
+// to standard.
+func TestSetQualityFloorForTabPersistsDeliveryToSidecar(t *testing.T) {
+	app, tab, _, path := newGoalDeliveryYoloTestApp(t, control.GoalStatusRunning)
+	if err := app.SetQualityFloorForTab(tab.ID, control.QualityFloorDelivery); err != nil {
+		t.Fatalf("SetQualityFloorForTab: %v", err)
+	}
+	if got := tab.qualityFloor; got != control.QualityFloorDelivery {
+		t.Fatalf("tab.qualityFloor = %q, want delivery", got)
+	}
+	meta, ok, err := agent.LoadBranchMeta(path)
+	if err != nil || !ok {
+		t.Fatalf("LoadBranchMeta = %+v, %v, %v", meta, ok, err)
+	}
+	if meta.QualityFloor != control.QualityFloorDelivery {
+		t.Fatalf("sidecar QualityFloor = %q, want delivery", meta.QualityFloor)
+	}
+	if meta.AgentPreset != boot.AgentPresetDelivery {
+		t.Fatalf("sidecar AgentPreset = %q, want delivery", meta.AgentPreset)
+	}
+	if meta.TokenMode != boot.TokenModeDelivery {
+		t.Fatalf("sidecar TokenMode = %q, want delivery", meta.TokenMode)
+	}
+}
+
+// saveTabSessionMeta (the session-switch persistence path) must carry the
+// tab's quality floor, not drop it to standard.
+func TestSaveTabSessionMetaPersistsQualityFloor(t *testing.T) {
+	app, tab, _, path := newGoalDeliveryYoloTestApp(t, control.GoalStatusRunning)
+	tab.qualityFloor = control.QualityFloorDelivery
+	if err := app.saveTabSessionMeta(tab, path); err != nil {
+		t.Fatalf("saveTabSessionMeta: %v", err)
+	}
+	meta, ok, err := agent.LoadBranchMeta(path)
+	if err != nil || !ok {
+		t.Fatalf("LoadBranchMeta = %+v, %v, %v", meta, ok, err)
+	}
+	if meta.QualityFloor != control.QualityFloorDelivery {
+		t.Fatalf("sidecar QualityFloor = %q, want delivery", meta.QualityFloor)
+	}
+	// Standard must still be treated as absent (existing contract).
+	tab.qualityFloor = ""
+	if err := app.saveTabSessionMeta(tab, path); err != nil {
+		t.Fatalf("saveTabSessionMeta(standard): %v", err)
+	}
+	meta, ok, err = agent.LoadBranchMeta(path)
+	if err != nil || !ok {
+		t.Fatalf("LoadBranchMeta after standard = %+v, %v, %v", meta, ok, err)
+	}
+	if meta.QualityFloor != "" {
+		t.Fatalf("standard must not persist a floor, got %q", meta.QualityFloor)
+	}
+}

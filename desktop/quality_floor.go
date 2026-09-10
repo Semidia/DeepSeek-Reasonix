@@ -51,6 +51,13 @@ func (a *App) SetQualityFloorForTab(tabID, floor string) error {
 		a.saveTabsLocked()
 	}
 	a.mu.Unlock()
+	// Mirror the floor into the session's branch-meta sidecar so a restart or
+	// session reattach rebuilds the tab from the same delivery posture. The
+	// tabs file alone is not authoritative: tabSessionProfileFromMeta is the
+	// rebuild path and reads the sidecar.
+	if err := a.saveTabSessionMetaForCurrentSession(tab); err != nil {
+		return err
+	}
 	return nil
 }
 
